@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NeoDen4 control</title>
+<link rel="stylesheet" href="style.css">
+<script src="js/fa.js"></script>
+<script src="js/i18n.js"></script>
+</head>
+<body>
+<header id="top">
+  <div class="brand">NeoDen4</div>
+  <nav id="nav"></nav>
+  <div class="grow"></div>
+  <div id="conn" class="pill">…</div>
+  <div id="xyst" class="pill">XY: –</div>
+  <button id="evbtn" class="btn small danger" hidden title="the last errors, on every screen" onclick="App.showEvents()">⚠</button>
+  <div id="evlist" class="evlist" hidden></div>
+  <button id="homebtn" class="btn" title="Home XY (takes control)">⌂ Home</button>
+  <button id="ctl" class="btn">Take control</button>
+  <div class="menu">
+    <button id="sysbtn" class="btn ghost" title="System: status, files, updates" aria-haspopup="true" aria-expanded="false">System ▾</button>
+    <div id="sysmenu" class="menu-list" hidden></div>
+  </div>
+  <button id="langbtn" class="btn small" title="فارسی">فا</button>
+  <button id="themebtn" class="btn small" title="Dark theme">☾</button>
+  <button id="stop" class="btn danger" title="Cancel waits, valves off, nozzles up">STOP</button>
+</header>
+<div id="subnav"></div>
+<main id="page"></main>
+<div id="toasts"></div>
+<script src="js/api.js"></script>
+<script src="js/ini.js"></script>
+<script src="js/camera.js"></script>
+<script src="js/manual.js"></script>
+<script src="js/points.js"></script>
+<script src="js/settings.js"></script>
+<script src="js/nozzlecal.js"></script>
+<script src="js/setups.js"></script>
+<script src="js/boardmap.js"></script>
+<script src="js/wizard.js"></script>
+<script src="js/jobrun.js"></script>
+<script src="js/jobfile.js"></script>
+<script src="js/pkglib.js"></script>
+<script src="js/stackedit.js"></script>
+<script src="js/padalign.js"></script>
+<script src="js/visionlog.js"></script>
+<script src="js/network.js"></script>
+<script src="js/bulk.js"></script>
+<script src="js/stats.js"></script>
+<script src="js/checks.js"></script>
+<script src="js/setupview.js"></script>
+<script src="js/setupauto.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

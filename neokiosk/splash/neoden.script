@@ -1,0 +1,49 @@
+# NeoDen boot screen (plymouth script theme, docs/KIOSK.md): the logo and five running dots
+# on the kiosk's dark background, from the boot loader until the kiosk window takes over.
+
+fun background() {
+  Window.SetBackgroundTopColor(0.106, 0.122, 0.141);    # #1b1f24, as the kiosk's starting page
+  Window.SetBackgroundBottomColor(0.106, 0.122, 0.141);  # (setting it also repaints everything)
+}
+
+logo.image = Image("logo.png");
+logo.sprite = Sprite(logo.image);
+on = Image("dot.png");
+off = Image("dot-dim.png");
+N = 5; GAP = 26;
+for (i = 0; i < N; i++) dot[i] = Sprite(off);
+
+# centre on the biggest screen (the D525 boards also report a phantom 1024x768 LVDS panel).
+# The screen changes during the boot (the firmware's frame buffer, then the real graphics
+# driver): lay out and repaint again whenever it does, or only the dots would be drawn there.
+global.last = "";
+fun layout() {
+  w = 0; h = 0; x0 = 0; y0 = 0;
+  for (i = 0; Window.GetWidth(i); i++) {
+    if (Window.GetWidth(i) > w) {
+      w = Window.GetWidth(i); h = Window.GetHeight(i); x0 = Window.GetX(i); y0 = Window.GetY(i);
+    }
+  }
+  now = w + "x" + h + "+" + x0 + "+" + y0 + "/" + i;
+  if (now == global.last) return;
+  global.last = now;
+  background();
+  logo.sprite.SetPosition(x0 + (w - logo.image.GetWidth()) / 2, y0 + (h - logo.image.GetHeight()) / 2 - 40, 1);
+  dx = x0 + (w - (N - 1) * GAP - on.GetWidth()) / 2;
+  dy = y0 + (h + logo.image.GetHeight()) / 2 + 10;
+  for (j = 0; j < N; j++) dot[j].SetPosition(dx + j * GAP, dy, 1);
+}
+layout();
+
+tick = 0;
+fun refresh() {
+  tick++;
+  if (tick % 25 == 0) layout();                       # about twice a second
+  if (tick % 100 == 0) background();                  # and a full repaint every 2 s
+  lit = Math.Int(tick / 8) % N;                        # about 6 steps a second
+  for (j = 0; j < N; j++) {
+    if (j == lit) dot[j].SetImage(on);
+    else dot[j].SetImage(off);
+  }
+}
+Plymouth.SetRefreshFunction(refresh);

@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# build outputs (rebuilt by the build.sh next to them)
+*.exe
+*.o
+
+# Ubuntu image build: downloads, the image itself and generated payload
+build/image/*.img
+build/image/*.iso
+build/image/*.tar.gz
+build/image/payload.tgz
+
+# secrets (Wi-Fi password, logins) - never commit
+build/image/site.env
+build/image/credentials.txt
+build/bulk_dataset/
+build/bulk_*.png

@@ -1,0 +1,8 @@
+[Plymouth Theme]
+Name=NeoDen
+Description=NeoDen pick and place: logo and running dots until the kiosk shows the web UI
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/neoden
+ScriptFile=/usr/share/plymouth/themes/neoden/neoden.script
