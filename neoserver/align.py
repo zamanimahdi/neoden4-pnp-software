@@ -41,7 +41,7 @@ def _busy(f):
     whole call (some take minutes); no idle hand-over to another client meanwhile (hw.Machine.take)"""
     @functools.wraps(f)
     def w(self, q):
-        self._need(q.get("client", ""))
+        self._need(q.get("client", ""), getattr(w, "at_mark", False))      # set on the wrapped method (circle)
         busy = getattr(self.mc, "busy_call", None)
         with busy() if busy else contextlib.nullcontext():
             return f(self, q)
@@ -105,10 +105,12 @@ class AlignService:
                 c.raw["PadAlign/" + key] = (v in ("1", "true")) if key.startswith("b") else float(v)
         return c
 
-    def _need(self, client):
+    def _need(self, client, at_mark=False):
         if self.mc._owner() != client:
             raise PermissionError("take control first")
-        if getattr(self.mc, "job_running", False):
+        # at_mark: while the job waits for the operator to show it a mark (hw.Machine.jog_ok) the head may
+        # be moved, so the circle under the camera may be centred on too
+        if getattr(self.mc, "job_running", False) and not (at_mark and getattr(self.mc, "jog_ok", False)):
             raise PermissionError("a job is running")
 
     def vis(self, cfg):
@@ -545,7 +547,7 @@ class AlignService:
         import cv2
         from neocam.vision import find_mark_best
         from neocalib import grab_settled
-        self._need(q.get("client", ""))
+        self._need(q.get("client", ""), True)
         cfg = self.cfg(q)
         v = self.vis(cfg)
         mb = self.mc.board()
@@ -574,6 +576,8 @@ class AlignService:
         ok, png = cv2.imencode(".png", cv2.resize(v2, (300, 300)))
         return {"x": round(at[0], 4), "y": round(at[1], 4), "d": round(2 * r.r / k, 3), "q": round(r.precision, 3),
                 "png": base64.b64encode(png.tobytes()).decode()}
+
+    circle.at_mark = True
 
     def part_on_nozzle(self, cfg, n, x, y, z, delay=0.15, reach=5.0):
         """nozzle n picks the part at machine (x, y) (pick depth z), shows it to the bottom camera at nozzle
@@ -635,12 +639,24 @@ class AlignService:
             img = shot()
             k = cfg.pxmm(0)
             p = int(min(500, max(40, reach * k)))
-            r = V.analyze_nozzle(img, bg, p, k)
-            if r.valid and r.rect_px is not None:
+            self.last_reject = ""
+
+            def edge(r, p):
+                if not (r.valid and r.rect_px is not None):
+                    return False
                 cx, cy, w, h = r.rect_px[:4]
                 half = max(w, h) / 2
-                if abs(cx - 512) + half > p - 2 or abs(cy - 512) + half > p - 2:
-                    r = V.PartResult(False)              # touches the edge of the search: not a part
+                return abs(cx - 512) + half > p - 2 or abs(cy - 512) + half > p - 2
+            r = V.analyze_nozzle(img, bg, p, k)
+            if edge(r, p) and p < 500:                   # a big part (PC817, SO-8): the search twice as wide once
+                p2 = min(500, 2 * p)
+                r2 = V.analyze_nozzle(img, bg, p2, k)
+                if r2.valid and not edge(r2, p2):
+                    r, p = r2, p2
+            if edge(r, p):
+                self.last_reject = (f"found {r.w:.2f} x {r.h:.2f} mm, but it touches the edge of the search "
+                                    f"({p / k:.1f} mm round the nozzle): a light change or dirt, or a part this big")
+                r = V.PartResult(False)                  # touches the edge of the search: not a part
         finally:
             mb.up_light(False)
             mb.move_xy(x + o[0], y + o[1], timeout=20)          # back where it came from
@@ -730,6 +746,8 @@ class AlignService:
         if r.valid and q.get("job") and q.get("stack", "") != "":
             self.save_partpic(q["job"], int(q["stack"]), img, r, cfg.pxmm(0))
         if not r.valid:
+            if getattr(self, "last_reject", ""):
+                raise RuntimeError(f"nothing measured on nozzle {n}: {self.last_reject}")
             diff = cv2.subtract(img, bg)
             raise RuntimeError(f"nothing measured on nozzle {n}: not picked (pick height?), or too dark "
                                f"(picture grey {float(np.mean(img)):.0f}, part brighter than the empty nozzle "

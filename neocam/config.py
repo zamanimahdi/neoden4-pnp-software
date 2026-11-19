@@ -245,6 +245,8 @@ class NeoConfig:
                                      # posCamLookUpMouseMouseCenter; the nozzle tips are found
                                      # again at every job start (turned 0/90/180/-90: their axes)
         "nTipExposure": 600,         # up exposure for finding EMPTY nozzle tips
+        "fFourUpMaxShiftMm": 0.5,    # a tip axis read further than this from the stored one (dPosSubMouses) is
+                                     # not trusted: the stored axis is used
         "fFourUpMaxMm": 8.0,         # bigger parts (or lead vision, modes 2/3) are shot one by one
         "fUpMagPerMm": 0.0087,       # up camera: the picture grows this much per mm nearer the lens
                                      # (measured 2026-11-03 with the tips lowered at the 4-up corners);
@@ -288,10 +290,12 @@ class NeoConfig:
         "nPlaceApproachSpeed": 40,   # the last mm before a place point (one-sided: the backlash); 0 = speed 10
         "bCycleRoute": True,         # the picks and the places of a cycle in nearest-neighbour order
         "bAutoZMap": True,           # a job without a board height map (<job>.zmap.json): measured at its start
+        "fTallPartMm": 2.0,          # a part this tall (its feeder's part size H) is carried alone, and never over
+                                     # another such part already on the board (0 = off)
         "bZMapDepth": True,          # with a map: each part's place depth from the board there + its height
                                      # (the feeder's place height only for a part of no known height)
         "fPlacePressMm": 0.1,        # ... pressed this much past the part touching the board
-        "bSeeTurnSee": True,         # single-part vision: after turning to the place angle the part is looked at
+        "bSeeTurnSee": False,         # single-part vision: after turning to the place angle the part is looked at
                                      # again and turned until it reads right; nothing turns after the last
                                      # look, its offset is the one placed (the 4-up shot: Second look per stack)
         "nSeeTurnLooks": 5,          # looks at most (then the last one is used)

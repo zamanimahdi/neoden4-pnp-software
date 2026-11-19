@@ -10,6 +10,11 @@ part, looking at one part.
     GET  /api/bulk/grid                         the containers' layout: a matrix of cols x rows blocks
     POST /api/bulk/grid?client=  {grid}         saved, and the containers 1 .. cols x rows made from it
                                                 (row by row from block 1; their other settings kept)
+    GET  /api/bulk/holders                      the holder templates (plates of pockets) + the holder placed now
+    POST /api/bulk/holder?client=  {template, a: {mark, x, y}, b: {mark, x, y}, margin, apply}
+                                                the plate's place from two of its marks seen with the head
+                                                camera; apply=1: its pockets become the bulk feeders of
+                                                their numbers (their other settings kept)
     POST /api/bulk/confirm?client=&id=&count=   the operator saw the scan: that many parts are right
     POST /api/bulk/measure?client=&id=&x=&y=      the pick height read once on the part there (the nozzle
                                                 down by the pressure sensor), kept on the container
@@ -111,6 +116,62 @@ class BulkService:
                 cs.append(d)
         json.dump(cs, open(bf.path, "w", encoding="utf-8"), indent=1)
         return {"grid": g, "containers": len(cs)}
+
+    # ---- a holder: a plate of pockets from a template, placed by two of its marks ----
+    def holder_path(self):
+        return os.path.join(self.st.neoden_dir, "bulk_holder.json")
+
+    def holders(self, q=None):
+        import json
+        from neojob import holder as HD
+        p = self.holder_path()
+        try:
+            placed = json.load(open(p, encoding="utf-8")) if os.path.exists(p) else None
+        except ValueError:
+            placed = None
+        return {"templates": HD.templates(self.st.neoden_dir), "placed": placed}
+
+    def set_holder(self, q, body):
+        """body: template, a / b = {mark, x, y} (the head camera on that mark), margin; apply: the bulk
+        feeders are made (without it only the answer: where every pocket would lie)"""
+        import json
+        from neojob import holder as HD
+        b = body or {}
+        tpl = HD.template(str(b.get("template", "")), self.st.neoden_dir)
+        A, B = b.get("a") or {}, b.get("b") or {}
+        from neomach import proto as P
+        off = self.cfg().head_cam_offset                 # where the camera's centre can stand: the head's travel
+        reach = (-off[0] + 0.1, -off[1] + 0.1, P.X_MAX_MM - off[0] - 0.1, P.Y_MAX_MM - off[1] - 0.1)
+        r = HD.place(tpl, str(A.get("mark", "")), (float(A["x"]), float(A["y"])), str(B.get("mark", "")), (float(B["x"]), float(B["y"])),
+                     margin=min(10.0, max(0.0, float(b.get("margin", 1.5)))), reach=reach)
+        if not r["pockets"]:
+            raise ValueError("no pocket of the holder lies where the camera reaches")
+        if not b.get("apply"):
+            return {"holder": r}
+        self._need(q.get("client", ""))
+        if max(p["n"] for p in r["pockets"]) > MAX:
+            raise ValueError(f"a bulk feeder is 1 .. {MAX}")
+        bf = self._quiet()
+        old = {int(c["id"]): c for c in bf.containers()}
+        mine = {p["n"] for p in r["pockets"]}
+        gone = {u["n"] for u in r["unreachable"]}             # a pocket of this holder the camera cannot reach now
+        cs = [c for i, c in old.items() if i not in mine and not (i in gone and c.get("holder") == tpl["name"])]
+        for p in r["pockets"]:
+            d = dict(old.get(p["n"], {"id": p["n"], "name": f"Bulk {p['n']}", "pin1": True, "exp_bottom": 300, "nozzle": 1}))
+            moved = any(abs(float(d.get(k, -1e9)) - p[k]) > 0.05 for k in ("x0", "y0", "x1", "y1"))
+            d.update(id=p["n"], x0=p["x0"], y0=p["y0"], x1=p["x1"], y1=p["y1"], holder=tpl["name"])
+            d.pop("row", None); d.pop("col", None)
+            if moved:                                        # a new place: the last scan is not there any more
+                d.pop("parts", None); d.pop("count", None); d.pop("scanned", None); d.pop("confirmed", None)
+            cs.append(d)
+        cs.sort(key=lambda c: int(c["id"]))
+        json.dump(cs, open(bf.path, "w", encoding="utf-8"), indent=1)
+        json.dump(r, open(self.holder_path(), "w", encoding="utf-8"), indent=1)
+        self.log(f"holder '{tpl['name']}' placed: {len(r['pockets'])} bulk feeders, turned {r['angle']:+.2f} deg, "
+                 f"marks {r['error']:+.2f} mm from the drawing"
+                 + (f"; out of the camera's reach: {', '.join(str(u['n']) for u in r['unreachable'])}" if r["unreachable"] else "")
+                 + (f"; cut short: {', '.join(map(str, r['clipped']))}" if r["clipped"] else ""), "bulk")
+        return {"holder": r, "containers": len(r["pockets"])}
 
     def confirm(self, q):
         """the operator checked the scan: the count seen is right"""

@@ -209,6 +209,25 @@ class Handler(BaseHTTPRequestHandler):
                 d = {}
             S.events.add(str(d.get("level", "bad"))[:10], str(d.get("text", ""))[:400], str(q.get("client", "") or d.get("from", ""))[:40])
             return self.ok()
+        if ep == "power" and m == "POST":            # the machine PC itself: restarted or shut down properly
+            # (pulling the plug made the disk repair itself at every start: 17 boots in a row, 2026-11)
+            act = q.get("action", "")
+            if act not in ("reboot", "poweroff"):
+                return self.err(400, "action=reboot or poweroff")
+            try:
+                if S.job.running():
+                    return self.err(409, "a job is running: stop it first")
+            except Exception:
+                pass
+            S.log(f"{peer}: {'restart' if act == 'reboot' else 'shut down'} of the machine PC", "server")
+            try:
+                S.mc.cancel()
+                S.mc.board().raise_all()                 # nozzles up, so nothing stands on the board
+            except Exception:
+                pass
+            import subprocess
+            threading.Timer(1.0, lambda: subprocess.run(["systemctl", act], check=False)).start()
+            return self.ok(action=act)
         if ep == "log":
             return self.send(200, S.log.since(int(q.get("since", 0) or 0)))
         if ep == "files":
@@ -373,12 +392,16 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send(200, data, "image/png", {"Cache-Control": "no-store"})
                 if what == "grid" and m != "POST":
                     return self.send(200, {**S.bulk.grid(q), "ok": True})
+                if what == "holders":
+                    return self.send(200, {**S.bulk.holders(q), "ok": True})
                 if m != "POST":
                     return self.err(400, "use POST")
                 if what == "save":
                     return self.send(200, {**S.bulk.save(q, json.loads(self.body() or b"{}")), "ok": True})
                 if what == "grid":
                     return self.send(200, {**S.bulk.set_grid(q, json.loads(self.body() or b"{}")), "ok": True})
+                if what == "holder":
+                    return self.send(200, {**S.bulk.set_holder(q, json.loads(self.body() or b"{}")), "ok": True})
                 f = {"delete": S.bulk.delete, "scan": S.bulk.scan, "look": S.bulk.look, "teach": S.bulk.teach, "trial": S.bulk.trial,
                      "measure": S.bulk.measure, "confirm": S.bulk.confirm}.get(what)
                 if not f:
@@ -505,6 +528,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self.err(400, "JSON body needed")
             code, reply = S.setup.call(req)
             return self.send(code, reply)
+        if ep in ("setup/board", "setup/board.png") and m == "GET":       # the Gerber as one picture (neoserver.setup)
+            try:
+                if ep == "setup/board":
+                    return self.send(200, {**S.setup.board_info(q.get("sid", "")), "ok": True})
+                return self.send(200, S.setup.board_png(q.get("sid", "")), "image/png")
+            except Exception as e:
+                return self.err(409, f"{type(e).__name__}: {e}")
         if ep == "setup/close" and m == "POST":
             S.setup.close(q.get("sid", ""))
             return self.ok()

@@ -68,7 +68,8 @@ class Stack:
     part_l: float = 0.0                    # ours: part size for the size check (0 = footprint library)
     part_w: float = 0.0
     pad_align: bool = False                # ours: pad alignment with the head camera for all its parts
-    second_look: bool = True               # ours: turned to the place angle, photographed again, corrected
+    second_look: bool = False              # ours: two-stage vision for all its parts: turned to the place angle,
+                                           # photographed again, corrected (off unless "Yes": one look is the default)
                                            # (on unless the feeder says No)
     part_h: float = 0.0                    # ours: part height mm (4-up perspective correction; 0 = pkg.csv)
     bulk: int = 0                          # ours: the bulk feeder (container 1 .. 30) the parts come from
@@ -126,6 +127,7 @@ class Comp:
     pad_align: object = None               # ours (field 9): True / False, None = as its feeder says
     size_check: object = None              # ours (field 10): True / False, None = as its feeder says
     place_check: object = None             # ours (field 11): "none" / vacuum / photo / both, None = as its feeder says
+    second_look: object = None             # ours (field 12): two-stage vision: True / False, None = as its feeder says
     key: str = ""                          # the designator, "#2", "#3" ... added for its next copies (a panelized
                                            # file lists every board's parts under the same designators)
 
@@ -251,7 +253,7 @@ def load(path):
             if len(tail) > 9:
                 s.pad_align = _yes(tail[9])
             if len(tail) > 10:
-                s.second_look = tail[10].strip().lower() not in ("no", "0", "false")     # empty: on
+                s.second_look = _yes(tail[10])                  # two-stage vision: only when it says Yes
             if len(tail) > 11:
                 s.part_h = _f(tail[11])
             if len(tail) > 12:
@@ -294,7 +296,7 @@ def load(path):
             own = lambda i: (lambda v: True if v in YES else False if v in ("no", "0", "false") else None)(k[i].strip().lower() if len(k) > i else "")
             pc = _check(k[11]) if len(k) > 11 and k[11].strip() else None
             job.comps.append(Comp(_i(k[0], 1), _i(k[1], 1), k[2], k[3], k[4], _f(k[5]), _f(k[6]), _f(k[7]), k[8].strip().lower() in SKIP_WORDS,
-                                  own(9), own(10), "none" if pc == "" else pc))
+                                  own(9), own(10), "none" if pc == "" else pc, own(12)))
     seen = {}
     for c in job.comps:
         seen[c.name] = seen.get(c.name, 0) + 1

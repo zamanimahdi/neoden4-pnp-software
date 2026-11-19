@@ -17,13 +17,16 @@ const Bulk = {
     const need = async () => API.st.haveControl || (await API.take());
     const cam = Manual.coordCam(1);
     this.cam = cam;
+    let hd = null;
+    try { hd = await API.req("GET", "/api/bulk/holders"); } catch (e) { /* an older server: no holders */ }
+    if (hd && (hd.templates || []).length) root.append(this.holder(hd, cs, need));
     root.append(this.layout(d, cs, cam, need));
     const list = h("div", { class: "card" }, h("div", { class: "row", style: "margin-top:0" }, h("h3", { style: "margin:0" }, `Bulk feeders (${cs.length} of ${d.max})`),
       h("div", { class: "grow" }),
       h("button", { class: "btn", title: "one more block outside the matrix (its own corners)", onclick: () => { const used = new Set(cs.map((c) => +c.id)); let n = 1; while (used.has(n) && n <= d.max) n++; if (n > d.max) return toast("all 30 are defined", "warn"); this.sel = n; this.draft = { id: n, name: `Bulk ${n}`, pin1: true, exp_bottom: 300, nozzle: 1 }; App.show(); } }, "+ Single block")),
       h("table", { class: "pick" }, h("tr", {}, ["#", "Row / col", "Name", "Package", "Parts", "Scanned", "Direction"].map((t) => h("th", {}, t))),
         cs.map((c) => h("tr", { class: +c.id === +this.sel ? "sel" : "", onclick: () => { this.sel = c.id; this.draft = null; App.show(); } },
-          h("td", {}, String(c.id)), h("td", { class: "muted" }, c.row ? `${c.row} / ${c.col}` : "own"), h("td", {}, c.name || ""),
+          h("td", {}, String(c.id)), h("td", { class: "muted" }, c.holder ? "holder" : c.row ? `${c.row} / ${c.col}` : "own"), h("td", {}, c.name || ""),
           h("td", {}, c.package || h("span", { class: "muted" }, "not taught")),
           h("td", {}, c.count === 0 ? h("b", { style: "color:var(--bad)" }, "EMPTY: refill") : String(c.count ?? "—")),
           h("td", { class: "muted" }, c.scanned || "—"), h("td", { class: "muted" }, Bulk.dirName(c))))));
@@ -36,6 +39,98 @@ const Bulk = {
   dirName(c) {
     const s = c.dir_source || (c.orient === "fixed" ? "laid" : "top");
     return { laid: "laid by hand", top: "head camera", bottom: "bottom camera" }[s] || s;
+  },
+
+  // ---- a holder: one plate of pockets from a template, placed on the table by two of its marks ----
+  holder(hd, cs, need) {
+    const pl = hd.placed, st = this.hold || (this.hold = { tpl: (pl && pl.template) || hd.templates[0].name, margin: (pl && pl.margin) ?? 1.5, pts: {}, res: null });
+    const t = hd.templates.find((x) => x.name === st.tpl) || hd.templates[0];
+    if (!st.ma || !t.marks.some((m) => m.name === st.ma)) { st.ma = (t.ref || [])[0] || t.marks[0].name; st.mb = (t.ref || [])[1] || t.marks[1].name; }
+    if (pl && pl.template === t.name && !st.init) { st.init = 1; pl.ref.forEach((r, i) => { st[i ? "mb" : "ma"] = r.mark; st.pts[r.mark] = [r.x, r.y]; }); st.res = pl; }
+    const camPos = () => { const p = (API.st.status || {}).pos; if (!p) { toast("position unknown", "bad"); return null; } const o = Cfg.offset(0); return [p[0] - o[0], p[1] - o[1]]; };
+    const go = async (x, y) => { if (!(await need())) return; await API.run("led", { v: 3 }); if (await API.run("move", { x: (x + Cfg.offset(0)[0]).toFixed(3), y: (y + Cfg.offset(0)[1]).toFixed(3), slow: 1 })) { await App.poll(); if (this.cam) this.cam.start(); } };
+    const msg = h("div", { class: "muted", style: "font-size:12px;min-height:18px" });
+    const body = () => ({ template: t.name, margin: st.margin, a: { mark: st.ma, x: (st.pts[st.ma] || [])[0], y: (st.pts[st.ma] || [])[1] }, b: { mark: st.mb, x: (st.pts[st.mb] || [])[0], y: (st.pts[st.mb] || [])[1] } });
+    const both = () => st.pts[st.ma] && st.pts[st.mb] && st.ma !== st.mb;
+    const info = (r) => `turned ${fmt(r.angle, 2)}°, the marks ${fmt(r.error, 2)} mm from the drawing`
+      + ((r.unreachable || []).length ? `. Out of the camera's reach (not made): ${r.unreachable.map((u) => u.n).join(", ")}` : "")
+      + ((r.clipped || []).length ? `. Cut short at the camera's reach: ${r.clipped.join(", ")}` : "");
+    const lost = (n) => st.res && (st.res.unreachable || []).some((u) => +u.n === +n);
+    const preview = async () => {
+      st.res = null;
+      if (!both()) { msg.textContent = "Put the camera on both marks."; msg.style.color = ""; return draw(); }
+      try { st.res = (await API.req("POST", `/api/bulk/holder?client=${API.st.client}`, JSON.stringify(body()))).holder;
+        msg.textContent = info(st.res); msg.style.color = ""; }
+      catch (e) { msg.textContent = e.message; msg.style.color = "var(--bad)"; }
+      draw();
+    };
+    const apply = async () => {
+      if (!both()) return toast("Put the camera on both marks.", "warn");
+      const used = cs.filter((c) => t.pockets.some((p) => +p.n === +c.id) && c.holder !== t.name).length;
+      if (!confirm(`Make ${st.res ? st.res.pockets.length : t.pockets.length} bulk feeders from this holder, numbered as its pockets?` + (used ? ` ${used} bulk feeder(s) with these numbers are moved into it.` : "") + " A block that moves loses its last scan.")) return;
+      if (!(await need())) return;
+      try { const r = await API.req("POST", `/api/bulk/holder?client=${API.st.client}`, JSON.stringify({ ...body(), apply: 1 })); toast(`${r.containers} bulk feeders`, "ok"); st.init = 0; App.show(); }
+      catch (e) { toast(e.message, "bad"); }
+    };
+    // the drawing: the plate as on its template (pocket numbers, the marks); green = a mark already given
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    const S = 2, pad = 6;
+    svg.setAttribute("viewBox", `${-pad} ${-pad} ${t.w * S + 2 * pad} ${t.h * S + 2 * pad}`); svg.setAttribute("style", "width:100%;background:#12161b;border-radius:6px");
+    const el = (tag, a, txt) => { const e = document.createElementNS("http://www.w3.org/2000/svg", tag); for (const k in a) e.setAttribute(k, a[k]); if (txt) e.textContent = txt; svg.append(e); return e; };
+    const draw = () => {
+      svg.replaceChildren();
+      el("rect", { x: 0, y: 0, width: t.w * S, height: t.h * S, fill: "#1b222b", stroke: "#4b5663" });
+      t.pockets.forEach((p) => {
+        const c = cs.find((x) => +x.id === +p.n && x.holder === t.name);
+        const r = el("rect", { x: p.x * S, y: (t.h - p.y - p.h) * S, width: p.w * S, height: p.h * S, fill: lost(p.n) ? "rgba(255,77,77,.14)" : c ? "rgba(90,140,255,.18)" : "none", stroke: lost(p.n) ? "#a04545" : "#5a8cff", style: c ? "cursor:pointer" : "" });
+        if (c) r.addEventListener("click", () => { this.sel = c.id; this.draft = null; App.show(); });
+        el("text", { x: (p.x + p.w / 2) * S, y: (t.h - p.y - p.h / 2) * S - 2, fill: "#cfe0ff", "font-size": 13, "text-anchor": "middle", "pointer-events": "none" }, String(p.n));
+        if (c) el("text", { x: (p.x + p.w / 2) * S, y: (t.h - p.y - p.h / 2) * S + 12, fill: "#8fa3bd", "font-size": 8, "text-anchor": "middle", "pointer-events": "none" }, (c.package || "").slice(0, 9));
+      });
+      t.marks.forEach((m) => {
+        const role = m.name === st.ma ? "A" : m.name === st.mb ? "B" : "", got = role && st.pts[m.name];
+        el("circle", { cx: m.x * S, cy: (t.h - m.y) * S, r: Math.max(2.5, m.d * S / 2), fill: got ? "#3ecf8e" : role ? "#ffb648" : "none", stroke: role ? "#fff" : "#6b7785" });
+        if (role) el("text", { x: m.x * S + (m.x > t.w / 2 ? -9 : 9), y: (t.h - m.y) * S + 4, fill: "#ffb648", "font-size": 11, "font-weight": 700, "text-anchor": m.x > t.w / 2 ? "end" : "start" }, role);
+      });
+    };
+    const sel = (key) => h("select", { onchange: (e) => { st[key] = e.target.value; App.show(); } }, t.marks.map((m) => h("option", { value: m.name, selected: m.name === st[key] }, m.label || m.name)));
+    const pos = (k) => h("span", { class: "muted" }, st.pts[st[k]] ? ` ${fmt(st.pts[st[k]][0], 2)}, ${fmt(st.pts[st[k]][1], 2)}` : " not set");
+    const setBtn = (k) => h("button", { class: "btn small", title: "the crosshair on the middle of this hole", onclick: () => { const p = camPos(); if (!p) return; st.pts[st[k]] = [+p[0].toFixed(3), +p[1].toFixed(3)]; App.show(); } }, "Set = camera");
+    const goBtn = (k) => h("button", { class: "btn small ghost", title: "the camera back to where this mark was set", onclick: () => { const p = st.pts[st[k]]; if (p) go(p[0], p[1]); } }, "Go");
+    const row = (label, ...e) => h("div", { class: "sefield" }, h("span", {}, label), ...e);
+    // every pocket that has a part defined (a package taught, or laid by hand), one after the other
+    const taught = cs.filter((c) => c.holder === t.name && (c.package || c.dir_source === "laid" || c.orient === "fixed"));
+    const scanBtn = h("button", { class: "btn", title: "only the pockets with a package: an empty or undefined pocket is not photographed", disabled: !taught.length,
+      onclick: async () => {
+        if (this.scanning) { this.scanning = false; return; }                 // a second press stops after the pocket in work
+        if (!(await need())) return;
+        this.scanning = true; scanBtn.textContent = "Stop the scan";
+        const t0 = Date.now(); let parts = 0, done = 0; const empty = [];
+        for (const c of taught) {
+          if (!this.scanning) break;
+          msg.style.color = ""; msg.textContent = `scanning pocket ${c.id} (${done + 1} of ${taught.length})`;
+          try { const r = await API.req("POST", `/api/bulk/scan?client=${API.st.client}&id=${c.id}`); parts += r.count; done++; if (!r.count) empty.push(c.id); }
+          catch (e) { toast(`pocket ${c.id}: ${e.message}`, "bad"); break; }
+        }
+        this.scanning = false;
+        toast(`${done} pockets scanned, ${parts} parts, ${fmt((Date.now() - t0) / 1000, 0)} s` + (empty.length ? `; empty: ${empty.join(", ")}` : ""), empty.length ? "warn" : "ok");
+        App.show();
+      } }, `Scan the defined pockets (${taught.length})`);
+    const form = h("div", { class: "seform" },
+      h("div", { class: "muted", style: "font-size:12px;margin-bottom:6px" },
+        "A holder is one plate with many pockets. Lay it anywhere on the table (along the axes, within 10°), put the camera's crosshair on two of its holes and press Apply: every pocket becomes the bulk feeder of its number. Moved the holder? Set the two holes again and Apply: packages and settings are kept, only the scans are taken again."),
+      row("Holder", h("select", { onchange: (e) => { st.tpl = e.target.value; st.ma = null; st.pts = {}; st.res = null; App.show(); } }, hd.templates.map((x) => h("option", { value: x.name, selected: x.name === t.name }, `${x.name} (${x.pockets.length})`)))),
+      row("Mark A", sel("ma"), setBtn("ma"), goBtn("ma"), pos("ma")),
+      row("Mark B", sel("mb"), setBtn("mb"), goBtn("mb"), pos("mb")),
+      row("Margin from the walls", h("input", { type: "number", step: "0.5", min: "0", max: "10", style: "width:65px", value: st.margin, onchange: (e) => { st.margin = +e.target.value; preview(); } }), " mm",
+        help("A part lying against a pocket's wall is not seen whole: the scanned area ends this far from every wall.")),
+      msg,
+      h("div", { class: "row" }, h("button", { class: "btn primary", onclick: apply }, "Apply: make the bulk feeders"), scanBtn),
+      h("div", { class: "muted", style: "font-size:12px" }, "What lies in each pocket: Job file → Feeder settings → the feeder's Bulk feeder number (the pocket's number). Drawing: orange = a mark to set, green = set, blue = a pocket that is a bulk feeder now (click to edit)."));
+    draw();
+    if (both() && !st.res) preview(); else if (st.res) msg.textContent = info(st.res);
+    return h("div", { class: "card" }, h("h3", { style: "margin-top:0" }, "Holder (a plate of pockets)"),
+      h("div", { style: "display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.4fr);gap:12px;align-items:start" }, form, svg));
   },
 
   // ---- the layout: a matrix of blocks, set with the head camera, and its drawing ----

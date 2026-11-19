@@ -177,7 +177,22 @@ const SetupView = {
       toast("feeder by feeder: done", "ok");
     };
 
+    // the feeders' parts are drawn when they come near the screen (checked on scroll: no observer needed)
+    let pending = [], shown = false;
+    const fillNear = () => {
+      if (!out.isConnected) { if (shown) removeEventListener("scroll", fillNear, true); return; }
+      shown = true;
+      pending = pending.filter((b) => {
+        if (b.getBoundingClientRect().top > innerHeight + 700) return true;
+        b.style.minHeight = ""; b._fill(); return false;
+      });
+    };
+    addEventListener("scroll", fillNear, true);
+    const lazy = { observe: (b) => pending.push(b) };
     const draw = () => {
+      const keep = document.scrollingElement ? document.scrollingElement.scrollTop : 0;
+      pending = [];
+      requestAnimationFrame(() => { if (document.scrollingElement) document.scrollingElement.scrollTop = keep; fillNear(); }); setTimeout(fillNear, 60); setTimeout(fillNear, 400);
       const want = this.only.split(",").map((t) => t.trim().toLowerCase()).filter(Boolean);
       const hit = (p) => !want.length || want.some((w) => p.key.toLowerCase() === w || (p.footprint || "").toLowerCase().includes(w) || String(p.stack) === w);
       const by = {};
@@ -189,12 +204,17 @@ const SetupView = {
         const pa = pickAngle(sid);
         const btn = h("button", { class: "btn small" + (f.pic ? "" : " primary"), title: "pick one part, photograph it on the bottom camera, put it back" }, f.pic ? "Take again" : "Take picture");
         btn.onclick = () => takePic(f, btn);
+        // its parts are drawn when the feeder comes near the screen: all at once was 394 canvases on every
+        // redraw (each turn button), seconds on the machine's own screen
+        const body = h("div", { style: `display:flex;flex-wrap:wrap;gap:8px;min-height:${Math.ceil(by[sid].length / 5) * 215}px` });
+        body._fill = () => body.append(...by[sid].map((p) => card(p, f)));
+        lazy.observe(body);
         return h("div", { class: "card" },
           h("div", { class: "row", style: "margin-top:0" }, h("b", {}, `Feeder ${sid}${f.bulk ? ` (bulk ${f.bulk})` : ""}`), h("span", {}, f.value || ""),
             h("span", { class: "muted" }, f.pic ? `picture ${f.pic.time}, ${fmt(f.pic.L, 2)} x ${fmt(f.pic.W, 2)} mm` : "no picture of its part yet"), btn,
             h("div", { class: "grow" }), h("span", {}, `Pick angle ${fmt(pa, 0)}°`),
             ...[-90, 90, 180].map((a) => h("button", { class: "btn small", title: `Pick angle ${a > 0 ? "+" : ""}${a}° (Save the job to keep it)`, onclick: () => setAngle(sid, pa + a) }, `${a > 0 ? "+" : ""}${a}°`))),
-          h("div", { style: "display:flex;flex-wrap:wrap;gap:8px" }, ...by[sid].map((p) => card(p, f))));
+          body);
       }));
       if (!ids.length) out.append(h("div", { class: "muted" }, "no parts"));
       renderWalk();

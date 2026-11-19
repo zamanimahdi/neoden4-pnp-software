@@ -35,7 +35,26 @@ from neocam import bulk as BK
 
 HEAD, UP = 1, 0
 MAX = 30
-STEP_MM = 7.0                     # the scan grid (the head camera sees ~8.9 mm at 1024 px)
+STEP_MM = 7.0                     # the scan grid when the picture's size is not known
+HEAD_PX = 1024                    # the head camera's picture as the job sets it
+SCAN_PAD_MM = 1.5                 # the scan's pictures reach this far past the feeder's area (a holder's margin:
+                                  # up to the pocket's wall, so a body lying against it is seen whole)
+OVERLAP_MM = 0.8                  # two neighbouring scan pictures share this much (the stitching's seam)
+
+
+def scan_grid(x0, x1, y0, y1, fov):
+    """where the scan's pictures are taken: the fewest that cover x0 .. x1, y0 .. y1 with pictures `fov` mm
+    wide and high, neighbours sharing OVERLAP_MM; a snake from the top row down, so the moves are short.
+    The pictures' middles stand in from the area's edge by half a picture: nothing outside it is taken."""
+    step = max(2.0, fov - OVERLAP_MM)
+
+    def axis(a, b):
+        n = max(1, int(math.ceil((b - a - fov) / step - 1e-9)) + 1) if b - a > fov else 1
+        if n == 1:
+            return [(a + b) / 2]
+        return [a + fov / 2 + (b - a - fov) * i / (n - 1) for i in range(n)]
+    xs, ys = axis(x0, x1), axis(y0, y1)
+    return [(x, y) for j, y in enumerate(reversed(ys)) for x in (xs if j % 2 == 0 else xs[::-1])], xs, ys
 
 
 def wrap(a):
@@ -66,68 +85,121 @@ def template_from_json(d):
     return t, d.get("bottom")
 
 
-def find_body_rects(mosaic, k, floor_frac=0.45):
-    """the dark bodies on a container's floor in a picture (k px / mm), touching ones split. A body is a
-    convex rectangle: a dark area that fills most of its convex hull (solidity >= 0.88) is one body and is
-    never split. A less solid one is several bodies touching: it is shrunk step by step until it falls
-    apart into pieces (one per body), and its area is shared out between them (watershed). The marking on
-    a body (bright letters, holes in the dark area) is filled first.
-    Returns [{"cx", "cy" (px), "L", "W" (mm), "angle" (deg, cv2), "box" (4 corners px)}]"""
+LEVELS = (0.55, 0.7, 0.82, 0.9)
+
+def _pieces(d, sub, level, k):
+    """the bodies of one dark area: its cores (deeper than level x the deepest point) grown back by what was
+    taken off, each pixel to its nearest core -> [(mask, core depth)]"""
+    dmax = float(d.max())
+    r = level * dmax
+    m, pl, ps, _ = cv2.connectedComponentsWithStats((d > r).astype(np.uint8))
+    keep = [j for j in range(1, m) if ps[j, 4] >= (0.35 * k) ** 2]
+    if not keep:
+        return []
+    cores = np.isin(pl, keep)
+    dist, near = cv2.distanceTransformWithLabels((~cores).astype(np.uint8), cv2.DIST_L2, 5, labelType=cv2.DIST_LABEL_PIXEL)
+    # the label image of distanceTransformWithLabels numbers the zero pixels: map them to the cores
+    lut = np.zeros(int(near.max()) + 1, np.int32)
+    lut[near[cores]] = pl[cores]
+    owner = lut[near]
+    out = []
+    for j in keep:
+        body = ((owner == j) & (dist <= r + 1.5) & sub).astype(np.uint8)
+        out.append(body)
+    return out
+
+def _rect(body, k):
+    cs = cv2.findContours(body, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0]
+    if not cs:
+        return None
+    cc = max(cs, key=cv2.contourArea)
+    (cx, cy), (a, b), ang = cv2.minAreaRect(cc)
+    if min(a, b) < 1:
+        return None
+    return {"cx": cx, "cy": cy, "a": a, "b": b, "ang": ang, "L": max(a, b) / k, "W": min(a, b) / k,
+            "fill": float(body.sum()) / (a * b), "area": float(body.sum()) / (k * k)}
+
+def find_body_rects(mosaic, k, floor_frac=0.45, size=None):
+    """the dark bodies on a container's floor in a picture (k px / mm), also where they lie packed: against
+    each other, against the pocket's wall, leads into leads. A dark area is taken apart by depth: its cores
+    (deeper inside than a share of its deepest point: a wall or a bridge of shadow is thinner than a body)
+    are each grown back to their body. A piece that is not a clean rectangle, or is longer / wider than the
+    pocket's own part (`size` = (L, W) mm when taught, else what most clean bodies of this picture measure),
+    is taken apart again one level deeper. One still too long with the right width runs on end-to-end into
+    a wall or a neighbour: it is cut to the part's length from its free end ("snapped"). The marking on a
+    body (bright letters, holes) is filled first. "cut": the body reaches the picture's edge; "odd": its size is not the pocket's own (or none is known).
+    Returns [{"cx", "cy" (px), "L", "W" (mm), "angle" (deg, cv2), "box" (4 corners px), "cut", "snapped"}]"""
     floor = float(np.percentile(mosaic, 70))
     g = cv2.GaussianBlur(mosaic, (5, 5), 0)
     dark = (g < floor_frac * floor).astype(np.uint8)
     dark = cv2.morphologyEx(dark, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     cs, hier = cv2.findContours(dark, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
-    for cc, hh in zip(cs, hier[0] if hier is not None else []):  # the holes inside a body (its marking) filled
+    for cc, hh in zip(cs, hier[0] if hier is not None else []):
         if hh[3] != -1 and cv2.contourArea(cc) < 6 * k * k:
             cv2.drawContours(dark, [cc], -1, 1, -1)
+    H, W = dark.shape
     n, lab, st, _ = cv2.connectedComponentsWithStats(dark)
-    markers = np.zeros(dark.shape, np.int32)
-    markers[dark == 0] = 1                                       # 1 = the floor
-    nm = 1
-    min_piece = (0.35 * k) ** 2
-    for i in range(1, n):
-        if st[i, 4] < 0.5 * k * k:
-            continue
-        x, y, w, h = st[i, 0], st[i, 1], st[i, 2], st[i, 3]
-        sub = (lab[y:y + h, x:x + w] == i).astype(np.uint8)
-        cc = max(cv2.findContours(sub, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0], key=cv2.contourArea)
-        hull = cv2.contourArea(cv2.convexHull(cc))
-        pieces = None
-        if hull > 0 and st[i, 4] / hull < 0.88:                 # not one rectangle: shrink until it falls apart
-            er = sub.copy()
-            for r in range(1, int(0.3 * min(w, h)) + 1):
-                er = cv2.erode(er, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
-                m, pl, ps, _ = cv2.connectedComponentsWithStats(er)
-                big = [j for j in range(1, m) if ps[j, 4] >= min_piece]
-                if len(big) >= 2:
-                    pieces = (pl, big)
-                    break
-                if not big:
-                    break
-        if pieces:
-            pl, big = pieces
-            for j in big:
-                nm += 1
-                markers[y:y + h, x:x + w][pl == j] = nm
-        else:
-            nm += 1
-            markers[y:y + h, x:x + w][sub == 1] = nm                # one body: all of it
-    n = nm - 1
-    cv2.watershed(cv2.cvtColor(mosaic, cv2.COLOR_GRAY2BGR), markers)
+    cands = []                                   # (rect, body mask, x, y, level index)
+    def clean(r, ref):
+        if r is None or r["L"] > 15 or r["fill"] < 0.84:
+            return False
+        return ref is None or (r["L"] <= 1.1 * ref[0] and r["W"] <= 1.12 * ref[1])
+    def split(sub, x, y, li, ref, out):
+        d = cv2.distanceTransform(cv2.copyMakeBorder(sub.astype(np.uint8), 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=0), cv2.DIST_L2, 5)[1:-1, 1:-1]
+        for body in _pieces(d, sub, LEVELS[li], k):
+            if body.sum() < 0.5 * k * k:
+                continue
+            r = _rect(body, k)
+            if clean(r, ref) or li + 1 >= len(LEVELS):
+                if r is not None:
+                    out.append((r, x, y, li))
+            else:
+                split(body.astype(bool), x, y, li + 1, ref, out)
+    ref = (max(size), min(size)) if size else None
+    for rnd in range(2):
+        cands = []
+        for i in range(1, n):
+            if st[i, 4] < 0.5 * k * k:
+                continue
+            x, y, w, h = st[i, 0], st[i, 1], st[i, 2], st[i, 3]
+            split(lab[y:y + h, x:x + w] == i, x, y, 0, ref, cands)
+        good = [(r["L"], r["W"]) for r, x, y, _ in cands if r["fill"] >= 0.84 and r["L"] <= 15 and r["L"] / max(r["W"], 0.1) <= 6
+                and min(r["cx"] + x, r["cy"] + y) > max(r["a"], r["b"]) / 2 + 3 and r["cx"] + x < W - max(r["a"], r["b"]) / 2 - 3 and r["cy"] + y < H - max(r["a"], r["b"]) / 2 - 3]
+        if ref is not None or len(good) < 3:
+            break
+        ref = (float(np.median([g[0] for g in good])), float(np.median([g[1] for g in good])))   # the pocket's own part
     out = []
-    for lab in range(2, n + 2):
-        reg = ((markers == lab) & (dark == 1)).astype(np.uint8)
-        if reg.sum() < 0.5 * k * k:
+    for r, x, y, li in cands:
+        if r["L"] > 15 or r["W"] < 0.5 or r["L"] / max(r["W"], 0.1) > 6:
             continue
-        cs, _ = cv2.findContours(reg, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        c = max(cs, key=cv2.contourArea)
-        (cx, cy), (a, b), ang = cv2.minAreaRect(c)
-        L, W = max(a, b) / k, min(a, b) / k
-        if L > 15 or W < 0.5 or L / max(W, 0.1) > 6:              # the container's rim, a shadow band
-            continue
-        out.append({"cx": float(cx), "cy": float(cy), "L": round(L, 2), "W": round(W, 2), "angle": round(float(ang), 1),
-                    "box": cv2.boxPoints(((cx, cy), (a, b), ang)).tolist()})
+        cx, cy = r["cx"] + x, r["cy"] + y
+        snapped = False
+        if ref and r["L"] > 1.06 * ref[0] and r["W"] <= 1.12 * ref[1]:
+            # still too long, its width right: one end runs on into a wall or a neighbour (a butt joint).
+            # The end with the floor beyond it is the body's own: the body is its length from there
+            a, b = r["a"], r["b"]
+            th = math.radians(r["ang"] + (0 if a >= b else 90))
+            ux, uy = math.cos(th), math.sin(th)
+            half, wid = max(a, b) / 2, min(a, b)
+            def beyond(sgn):
+                vals = []
+                for t in np.linspace(-0.35, 0.35, 9):
+                    px = cx + sgn * (half + 0.35 * k) * ux - t * wid * uy
+                    py = cy + sgn * (half + 0.35 * k) * uy + t * wid * ux
+                    if 0 <= int(py) < H and 0 <= int(px) < W:
+                        vals.append(float(g[int(py), int(px)]))
+                return float(np.mean(vals)) if vals else 0.0
+            e1, e2 = beyond(+1), beyond(-1)
+            sgn = 1 if e1 >= e2 else -1
+            Lr = ref[0] * k
+            cx, cy = cx + sgn * (half - Lr / 2) * ux, cy + sgn * (half - Lr / 2) * uy
+            r = dict(r, L=ref[0], a=Lr if a >= b else a, b=b if a >= b else Lr)
+            snapped = True
+        box = cv2.boxPoints(((cx, cy), (r["a"], r["b"]), r["ang"]))
+        edge = bool((box[:, 0].min() < 2) or (box[:, 1].min() < 2) or (box[:, 0].max() > W - 3) or (box[:, 1].max() > H - 3))
+        out.append({"cx": float(cx), "cy": float(cy), "L": round(r["L"], 2), "W": round(r["W"], 2), "angle": round(float(r["ang"]), 1),
+                    "box": box.tolist(), "cut": edge, "snapped": snapped,
+                    "odd": bool(ref is None or abs(r["L"] - ref[0]) > 0.12 * ref[0] or abs(r["W"] - ref[1]) > 0.12 * ref[1]), "fill": round(r["fill"], 2), "level": li})
     return out
 
 
@@ -191,12 +263,14 @@ class BulkFeeder:
             return []
 
     # ---- the cameras and the head ----
-    def head_at(self, x, y):
-        """the head picture (oriented, full size, settled) with the camera's centre at (x, y)"""
+    def head_at(self, x, y, slow=True):
+        """the head picture (oriented, full size, settled) with the camera's centre at (x, y). slow: the
+        gentle move for the exact look at one part; the scan's many pictures go at the normal speed (the
+        table stands still, only the head moves, and the picture is taken once it has settled)"""
         from neocalib import grab_settled
         cam = self.cfg.head_cam_offset
         self.mb.head_led(3)
-        self.mb.move_xy(x + cam[0], y + cam[1], timeout=20, slow=True)
+        self.mb.move_xy(x + cam[0], y + cam[1], timeout=20, slow=slow)
         with self.vis.lock:
             d = self.vis.dev() if callable(self.vis.dev) else self.vis.dev
             raw = grab_settled(lambda: np.asarray(d.grab(HEAD)), tol_px=0.3, stable=2, max_s=1.5, min_s=0.1).frame
@@ -233,13 +307,29 @@ class BulkFeeder:
         y0, y1 = sorted((float(c["y0"]), float(c["y1"])))
         k = self.cfg.pxmm(HEAD)
         S = 0.25
-        nx, ny = max(1, int(math.ceil((x1 - x0) / STEP_MM))), max(1, int(math.ceil((y1 - y0) / STEP_MM)))
-        xs = [x0 + (x1 - x0) * (i + 0.5) / nx for i in range(nx)]
-        ys = [y0 + (y1 - y0) * (j + 0.5) / ny for j in range(ny)]
-        shots = []
-        for j, y in enumerate(reversed(ys)):
-            for x in (xs if j % 2 == 0 else xs[::-1]):              # a snake: shorter moves
-                shots.append((x, y, self.head_at(x, y)))
+        t0 = time.time()
+        # the grid is laid for what one picture sees (25 x 46 mm pocket: 18 pictures at 8.9 mm, where the
+        # fixed 7 mm grid took 28); a camera set to another picture size: laid again from the first picture
+        fov = HEAD_PX / k
+        cam = self.cfg.head_cam_offset
+        from neomach import proto as P
+        lim = (-cam[0] + 0.05, -cam[1] + 0.05, P.X_MAX_MM - cam[0] - 0.05, P.Y_MAX_MM - cam[1] - 0.05)   # the camera's centre
+        # the pictures reach SCAN_PAD_MM past the area: a body lying against the wall is seen whole, and the
+        # wall itself, so it can be told from the body. Never past where the head can go.
+        sx0, sx1 = max(x0 - SCAN_PAD_MM, lim[0] - fov / 2), min(x1 + SCAN_PAD_MM, lim[2] + fov / 2)
+        sy0, sy1 = max(y0 - SCAN_PAD_MM, lim[1] - fov / 2), min(y1 + SCAN_PAD_MM, lim[3] + fov / 2)
+        way, xs, ys = scan_grid(sx0, sx1, sy0, sy1, fov)
+        shots, i = [], 0
+        while i < len(way):
+            x, y = way[i]
+            im = self.head_at(x, y, slow=False)
+            if not shots and abs(min(im.shape) / k - fov) > 0.05:
+                fov = min(im.shape) / k
+                way, xs, ys = scan_grid(sx0, sx1, sy0, sy1, fov)
+                if way[0] != (x, y):
+                    continue
+            shots.append((x, y, im))
+            i += 1
         h, w = shots[0][2].shape
         mx0, my1 = min(xs) - w / 2 / k, max(ys) + h / 2 / k
         W = int((max(xs) - min(xs)) * k * S + w * S) + 4
@@ -254,8 +344,12 @@ class BulkFeeder:
             cnt[v:v + hh, u:u + ww] += 1
         mos = (mos / np.maximum(cnt, 1)).astype(np.uint8)
         found, boxes = [], []
-        for b in find_body_rects(mos, k * S):
+        top, _ = self.template(c.get("package"))
+        size = (float(top["L"]), float(top["W"])) if top and top.get("L") and top.get("W") else None
+        for b in find_body_rects(mos, k * S, size=size):
             X, Y = mx0 + b["cx"] / (k * S), my1 - b["cy"] / (k * S)
+            if b.get("cut") and b.get("odd"):                     # at the pictures' edge and not the part's size:
+                continue                                          # not whole, its middle is not known
             if x0 - 0.5 <= X <= x1 + 0.5 and y0 - 0.5 <= Y <= y1 + 0.5:
                 found.append({"x": round(X, 3), "y": round(Y, 3), "L": b["L"], "W": b["W"], "angle": b["angle"]})
                 boxes.append(b["box"])
@@ -270,7 +364,7 @@ class BulkFeeder:
             self.update(cid, parts=found, scanned=time.strftime("%Y-%m-%d %H:%M:%S"), count=len(found))
             # nearest first along a path: fewer long moves
             self.queue[int(cid)] = sorted(found, key=lambda f: (round(f["y"] / 5), f["x"]))
-        self.log(f"bulk feeder {cid}: {len(found)} parts seen")
+        self.log(f"bulk feeder {cid}: {len(found)} parts seen ({len(shots)} pictures, {time.time() - t0:.1f} s)")
         return found
 
     # ---- the next part to pick ----

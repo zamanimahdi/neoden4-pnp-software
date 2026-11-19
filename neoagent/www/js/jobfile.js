@@ -26,7 +26,7 @@ const JobFile = {
       [10, "Place height", "f", 60], [11, "Place delay", "i", 55], [12, "Vacuum detection", "yn", 60], [13, "Threshold", "i", 55],
       [14, "Vision", "vis", 0], [15, "Speed", "i", 50], [(t) => (t[2] === "1" ? 22 : 19), "Skip", "yn", 0]]],
     comps: ["comp", "Components", [[0, "Feeder", "i", 50], [1, "Nozzle", "i", 45], [2, "Name", "s", 80], [3, "Value", "s", 130], [4, "Footprint", "s", 100],
-      [5, "X", "f", 75], [6, "Y", "f", 75], [7, "Rotation", "f", 65], [8, "Skip", "yn", 55], [9, "Pad align", "pa", 0], [10, "Size check", "pa", 0], [11, "After placing", "pc", 0]]],
+      [5, "X", "f", 75], [6, "Y", "f", 75], [7, "Rotation", "f", 65], [8, "Skip", "yn", 55], [9, "Pad align", "pa", 0], [10, "Size check", "pa", 0], [11, "After placing", "pc", 0], [12, "Two-stage vision", "pa", 0]]],
     panels: ["mirror", "Panels", [[0, "X", "f", 75], [1, "Y", "f", 75], [2, "Rotation (0 / 180)", "i", 60], [3, "Skip", "nya", 70]]],
   },
 
@@ -51,7 +51,8 @@ const JobFile = {
       h("button", { class: "btn primary", onclick: () => { if (this.dirty && !confirm("The changes are not saved. Mount anyway?")) return; JobRun.mount(JobRun.path); location.hash = "#job"; } }, "Mount ▶"))));
     if (JobRun.mounted && JobRun.path === this.path) root.append(h("div", { class: "card", style: "border-color:var(--accent)" }, h("b", {}, "This job is mounted. "), JOB_EDIT_NOTE));
     const tabs = [["pcb", "PCB info"], ["stacks", "Feeder settings"], ["comps", "Components"], ["board", "Board"], ["panels", "Panels"], ["raw", "Raw file"]];
-    root.append(h("div", { class: "tabs" }, tabs.map(([k, t]) => h("button", { class: "btn" + (k === this.tab ? " on" : ""), onclick: () => { this.tab = k; App.show(); } }, t))));
+    root.append(h("div", { class: "tabs" }, tabs.map(([k, t]) => h("button", { class: "btn" + (k === this.tab ? " on" : ""), onclick: () => { this.tab = k; App.show(); } },
+      icon(({ pcb: "board", stacks: "reel", comps: "chip", board: "target", panels: "panel", raw: "code" })[k]), t))));
     const body = h("div", { class: "card" });
     root.append(body);
     if (this.tab === "panels") this.panelize(body);
@@ -158,6 +159,7 @@ const JobFile = {
     const gs = (this.gsel = this.gsel || {});
     const sel = (gs[tag] = new Set([...(gs[tag] || [])].filter((no) => rows.some(([, n]) => n === no))));
     const skipCol = cols.find((c) => c[1] === "Skip");
+    const visCol = cols.find((c) => c[2] === "vis");
     const setAll = (col, v) => {
       if (!sel.size) return toast("tick the rows first", "warn");
       if (v === "" && !["pa", "pc"].includes(col[2])) return toast(`type the value for ${col[1]} first`, "warn");
@@ -189,6 +191,10 @@ const JobFile = {
     const group = h("div", { class: "row", style: "margin:4px 0;flex-wrap:wrap;gap:6px;align-items:center" }, count,
       skipCol ? btn("Skip selected", () => setAll(skipCol, "Yes")) : null,
       skipCol ? btn("Unskip selected", () => setAll(skipCol, "No")) : null,
+      // the feeders' vision for all the ticked rows at once (it was only behind "or set" → Vision)
+      visCol ? h("span", { class: "muted" }, "Vision:") : null,
+      visCol ? btn("Individual", () => setAll(visCol, "1")) : null,
+      visCol ? btn("Joint", () => setAll(visCol, "2")) : null,
       h("span", { class: "muted" }, "or set"), colSel, gEditor,
       btn("Apply to selected", () => setAll(gcol, gval)),
       btn("Clear selection", () => { sel.clear(); boxes.forEach(([b]) => (b.checked = false)); refresh(); }));

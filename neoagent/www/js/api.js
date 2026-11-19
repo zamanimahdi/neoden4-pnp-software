@@ -134,3 +134,64 @@ const PathU = {
 };
 
 const fmt = (v, d = 2) => (v === null || v === undefined) ? "–" : Number(v).toFixed(d);
+
+// a help mark beside a field: "?" in a circle; the text shows on hover, on focus and on a tap (the
+// machine's touch screen has no hover). help("what this setting does")
+function help(text) {
+  if (!text) return null;
+  const el = h("span", { class: "help", tabindex: 0, role: "note", "aria-label": text, "data-tip": text }, "?");
+  el.addEventListener("click", (ev) => { ev.preventDefault(); ev.stopPropagation(); el.classList.toggle("open"); });
+  el.addEventListener("blur", () => el.classList.remove("open"));
+  return el;
+}
+
+// one setting as a row: a short title with its help mark, what it does in small print under it, the
+// control beside it. A long label "Title: what it does" (or "Title (what it is)") is split; it is
+// translated as a whole first, so the Persian texts keep working. key: the Config.ini key, shown in the help
+function setRow(label, ctl, key) {
+  const t = I18N.lang === "fa" ? I18N.tr(String(label)) : String(label);
+  let title = t, note = "";
+  const c = t.indexOf(": ");
+  if (c > 2 && c < 70) { title = t.slice(0, c); note = t.slice(c + 2); }
+  else { const m = /^(.{3,60}?)\s+\((.+)\)$/s.exec(t); if (m) { title = m[1]; note = m[2]; } }
+  if (note) note = note.charAt(0).toUpperCase() + note.slice(1);
+  key = key || (ctl && ctl.dataset && ctl.dataset.key) || "";
+  const tip = [note, key ? `Config.ini: ${key}` : ""].filter(Boolean).join("\n");
+  return h("div", { class: "setrow" },
+    h("div", { class: "setlabel" }, h("div", { class: "settitle" }, title, help(tip)), note ? h("div", { class: "setnote" }, note) : null),
+    h("div", { class: "setctl" }, ctl));
+}
+function setRows(rows) { return h("div", { class: "setrows" }, rows.map(([l, f, k]) => setRow(l, f, k))); }
+
+// line icons drawn here (no font, no files): icon("gear") -> <span class="i"><svg ...></span>; the paths are
+// on a 24 x 24 grid, drawn with the text's colour
+const ICONS = {
+  power: "M12 3v9M6.3 6.3a8 8 0 1011.4 0", restart: "M4 12a8 8 0 1014-5.3M18 3v4h-4",
+  play: "M7 5l12 7-12 7z", plus: "M12 5v14M5 12h14", stop: "M6 6h12v12H6z", check: "M5 12l5 5 9-10",
+  home: "M4 11l8-7 8 7M6 10v10h12V10", save: "M5 4h11l3 3v13H5zM8 4v5h7V4M8 20v-6h8v6",
+  gear: "M12 9a3 3 0 100 6 3 3 0 000-6zM19 12a7 7 0 00-.1-1.3l2-1.5-2-3.4-2.3.9a7 7 0 00-2.2-1.3L14 3h-4l-.4 2.4a7 7 0 00-2.2 1.3l-2.3-.9-2 3.4 2 1.5A7 7 0 005 12c0 .4 0 .9.1 1.3l-2 1.5 2 3.4 2.3-.9a7 7 0 002.2 1.3L10 21h4l.4-2.4a7 7 0 002.2-1.3l2.3.9 2-3.4-2-1.5c.1-.4.1-.9.1-1.3z",
+  file: "M6 3h8l4 4v14H6zM14 3v4h4", sliders: "M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M14 4v4M8 10v4M16 16v4",
+  chip: "M7 7h10v10H7zM10 3v4M14 3v4M10 17v4M14 17v4M3 10h4M3 14h4M17 10h4M17 14h4",
+  board: "M3 5h18v14H3zM7 9h4v3H7zM14 9h3M14 12h3M7 15h10",
+  target: "M12 5a7 7 0 100 14 7 7 0 000-14zM12 2v5M12 17v5M2 12h5M17 12h5",
+  mark: "M12 9a3 3 0 100 6 3 3 0 000-6zM12 3v4M12 17v4M3 12h4M17 12h4",
+  reel: "M12 4a8 8 0 100 16 8 8 0 000-16zM12 10a2 2 0 100 4 2 2 0 000-4zM12 20h9",
+  list: "M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01", gauge: "M4 17a8 8 0 1116 0M12 17l4-6",
+  out: "M12 4v10M8 10l4 4 4-4M5 19h14", camera: "M4 8h3l2-2h6l2 2h3v11H4zM12 11a3 3 0 100 6 3 3 0 000-6z",
+  move: "M12 3v18M3 12h18M9 6l3-3 3 3M9 18l3 3 3-3M6 9l-3 3 3 3M18 9l3 3-3 3",
+  ruler: "M4 15L15 4l5 5L9 20zM8 13l2 2M11 10l2 2M14 7l2 2", grid: "M4 4h16v16H4zM4 10h16M4 15h16M10 4v16M15 4v16",
+  box: "M4 8l8-4 8 4v8l-8 4-8-4zM4 8l8 4 8-4M12 12v8", eye: "M2 12s4-6 10-6 10 6 10 6-4 6-10 6S2 12 2 12zM12 9a3 3 0 100 6 3 3 0 000-6z",
+  wifi: "M4 10a12 12 0 0116 0M7 13.5a7.5 7.5 0 0110 0M10 17a3 3 0 014 0", chart: "M5 20V10M10 20V4M15 20v-8M20 20v-5",
+  pads: "M5 7h5v4H5zM14 7h5v4h-5zM5 14h5v4H5zM14 14h5v4h-5z", wand: "M5 19L16 8M14 6l4 4M18 2v4M16 4h4M6 4v3M4.5 5.5h3",
+  panel: "M3 4h8v7H3zM13 4h8v7h-8zM3 13h8v7H3zM13 13h8v7h-8z", code: "M8 7l-5 5 5 5M16 7l5 5-5 5M14 4l-4 16",
+  screen: "M3 5h18v12H3zM9 21h6M12 17v4", leads: "M8 6h8v12H8zM4 9h4M4 15h4M16 9h4M16 15h4", pin: "M12 21s6-6 6-11a6 6 0 10-12 0c0 5 6 11 6 11zM12 8a2 2 0 100 4 2 2 0 000-4z",
+};
+function icon(name) {
+  const d = ICONS[name];
+  if (!d) return null;
+  const s = document.createElement("span");
+  s.className = "i";
+  s.setAttribute("aria-hidden", "true");
+  s.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="${d}"/></svg>`;
+  return s;
+}

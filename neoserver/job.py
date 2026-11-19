@@ -71,7 +71,7 @@ class JobService:
             if not name.lower().endswith(".csv") or not os.path.isfile(p):
                 continue
             parts = placed = panels = 0
-            skip_st, comps = set(), []
+            skip_st, have_st, comps = set(), set(), []
             try:
                 raw = open(p, "rb").read()
                 text = raw.decode("utf-8") if not raw.startswith(codecs.BOM_UTF16_LE) else raw.decode("utf-16")
@@ -85,12 +85,14 @@ class JobService:
                     if t[9].strip().lower() not in ("yes", "1", "true", "是") and not t[3].upper().startswith("FID"):
                         comps.append(t[1].strip())
                 elif tag == "stack" and len(t) > 2:
+                    have_st.add(t[1].strip())
                     k = 23 if t[2].strip() == "1" else 20                       # the skip field (tray / tape)
                     if len(t) > k and t[k].strip().lower() in ("yes", "1", "true", "是"):
                         skip_st.add(t[1].strip())
                 elif tag == "mirror":
                     panels += 1
-            placed = sum(1 for sid in comps if sid not in skip_st)            # not skipped, nor their feeder
+            # not skipped, nor their feeder; a part with no feeder (0, or one not in the file) is not placed either
+            placed = sum(1 for sid in comps if sid in have_st and sid not in skip_st)
             last = used.get(name)
             if not last and os.path.exists(p + ".resume.json"):
                 last = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(os.path.getmtime(p + ".resume.json")))

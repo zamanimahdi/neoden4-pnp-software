@@ -186,26 +186,51 @@ class UsbCameras:
             except Exception:
                 pass
 
-    def grab(self, cam, timeout_ms=1000):
-        """one frame, 8-bit gray (h, w), as delivered (not rotated)"""
+    def grab(self, cam, timeout_ms=1000, retries=2):
+        """one frame, 8-bit gray (h, w), as delivered (not rotated). A short frame (bytes lost on the
+        bus: 1044992 of 1048576, seen several times a minute on the machine, each one a 3 s re-open of
+        both cameras) or a timeout: what is left of it is read away and the frame taken again here, up
+        to `retries` times. Another USB error goes up at once (the caller re-opens the cameras)."""
         c = self._cam(cam)
         n = c.w * c.h
         with c.lock:
-            box = {}
-
-            def rd():                               # the read must be pending before the trigger
-                try:
-                    box["data"] = c.read(n, timeout_ms)
-                except Exception as e:
-                    box["err"] = e
-            t = threading.Thread(target=rd, daemon=True)
-            t.start()
-            time.sleep(0.002)
-            c.vendor(CMD_CAPTURE)
-            t.join(timeout_ms / 1000 + 1)
+            for attempt in range(retries + 1):
+                box = self._shot(c, n, timeout_ms)
+                short = "err" not in box and len(box.get("data", ())) != n
+                timed = "err" in box and ("timed out" in str(box["err"]).lower() or "timeout" in type(box["err"]).__name__.lower())
+                if not (short or timed) or attempt == retries:
+                    break
+                self.regrabs = getattr(self, "regrabs", 0) + 1
+                self.last_regrab = (f"camera {c.id}: short frame {len(box['data'])} of {n}" if short
+                                    else f"camera {c.id}: no frame in {timeout_ms} ms") + ", taken again"
+                for _ in range(8):                  # the rest of the broken frame, if any
+                    try:
+                        if not len(c.read(0x10000, 20)):
+                            break
+                    except Exception:
+                        break
         if "err" in box or len(box.get("data", ())) != n:
             raise CamError(f"grab camera {c.id}: {box.get('err', 'short frame %d of %d' % (len(box.get('data', ())), n))}")
         return np.frombuffer(bytes(box["data"]), np.uint8).reshape(c.h, c.w).copy()
+
+    @staticmethod
+    def _shot(c, n, timeout_ms):
+        box = {}
+        reading = threading.Event()
+
+        def rd():                                   # the read must be pending before the trigger
+            reading.set()
+            try:
+                box["data"] = c.read(n, timeout_ms)
+            except Exception as e:
+                box["err"] = e
+        t = threading.Thread(target=rd, daemon=True)
+        t.start()
+        reading.wait(1.0)                           # the thread really runs (a busy PC: later than 2 ms after start)
+        time.sleep(0.003)
+        c.vendor(CMD_CAPTURE)
+        t.join(timeout_ms / 1000 + 1)
+        return box
 
     def close(self):
         try:

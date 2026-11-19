@@ -37,6 +37,14 @@ def test_small_circle_is_not_a_mark():
     assert find_mark_best(board("circle", 0.7), 0.5, 3.0, K).precision == 0      # under the 1 mm minimum
 
 
+def test_small_mark_of_the_job_is_found():
+    # BOARD-A (2026-11-19): markext 0.60 .. 0.93 mm; the 1 mm floor made the window 1.00 .. 1.00 mm
+    r = find_mark_best(board("circle", 0.8), 0.60, 0.93, K)
+    assert r.precision > 0 and abs(r.x - 400) < 2 and abs(r.y - 400) < 2, r
+    assert find_mark_best(board("circle", 0.45), 0.60, 0.93, K).precision == 0   # under the job's range
+    assert find_mark_best(board("square", 0.8), 0.60, 0.93, K).precision == 0    # a square pad still not
+
+
 def test_marks_that_do_not_match_the_board_ask():
     from test_neojob import FakeVision, make, JOB
     from neojob import load_job

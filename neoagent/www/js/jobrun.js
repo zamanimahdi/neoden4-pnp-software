@@ -145,11 +145,13 @@ const JobRun = {
     const cols = ["Feeder", "Nozzle", "Name", "Value", "Footprint", "X", "Y", "Rotation"];      // skipped parts are not listed
     const num = (c, k) => h("span", { class: "xy" }, c[k].toFixed(2));
     this.compRows = this.visible.map((c, i) => h("tr", { onclick: () => this.select(i) },
-      h("th", {}, String(c.i + 1)), h("td", {}, c.stack), h("td", {}, c.nozzle), h("td", {}, c.name), h("td", {}, c.value), h("td", {}, c.footprint),
+      // the row's number counts the parts that are placed (1 .. "to place"): hidden / skipped ones are not rows;
+      // its place in the job file (what the log's "next component [n]" says) is in the tooltip
+      h("th", { class: "rowno", title: `part ${c.i + 1} of the job file` }, String(i + 1)), h("td", {}, c.stack), h("td", {}, c.nozzle), h("td", {}, c.name), h("td", { title: c.value }, c.value), h("td", { title: c.footprint }, c.footprint),
       h("td", { class: "num" }, num(c, "x")), h("td", { class: "num" }, num(c, "y")), h("td", { class: "num" }, c.rot.toFixed(2))));
     this.compBox = h("div", { class: "scroll", style: "max-height:none;flex:1" },
-      h("table", { class: "pick" }, h("tr", {}, h("th", {}), cols.map((c) => h("th", {}, c))), this.compRows));
-    this.saveBtn = h("button", { class: "btn", onclick: () => this.save() }, "Save");
+      h("table", { class: "pick complist" }, h("tr", {}, h("th", { class: "rowno" }, "#"), cols.map((c) => h("th", { title: c }, ({ Feeder: "Fdr", Nozzle: "Nz", Rotation: "Rot" })[c] || c))), this.compRows));
+    this.saveBtn = h("button", { class: "btn", onclick: () => this.save() }, icon("save"), "Save");
     this.navBtns = [h("button", { class: "btn", onclick: () => this.goto(this.sel - 1) }, "<<"),
       h("button", { class: "btn", title: "the head camera over the point where this part lands (through the board marks)", onclick: () => this.goto(this.sel) }, "Vision Align"),
       h("button", { class: "btn", onclick: () => this.goto(this.sel + 1) }, ">>"),
@@ -169,8 +171,12 @@ const JobRun = {
     } });
     this.camUp = new CamView(0);
     this.camHead.labelBelow = this.camUp.labelBelow = true;        // the texts under the pictures, not on them
-    this.camUp.zoom = +localStorage.getItem("camUpZoom") || 4;     // the part on the nozzle, not the whole 32 mm field
-    this.camHead.zoom = +localStorage.getItem("camHeadZoom") || 1;
+    // zoom: Auto (from the size of the part being looked at) unless a fixed one was chosen on this screen
+    for (const v of [this.camUp, this.camHead]) {
+      const k = v.cam ? "camHeadZoomA" : "camUpZoomA", st = localStorage.getItem(k);
+      v.autoZoom = !st || st === "auto";
+      v.zoom = v.autoZoom ? (v.cam ? 1 : 4) : +st || 1;
+    }
     const lightFor = async (v) => {                       // head lamp / up light on with its camera, unless a job runs
       if (this.runState() !== "idle") return;
       if (v.cam === 1) await API.run("led", { v: +Cfg.get("PadAlign/nLed", 3) || 3 });
@@ -183,8 +189,13 @@ const JobRun = {
       } });
       v.liveBox = live;
       return h("div", { class: "camcell" }, h("div", { class: "camhead" }, h("b", {}, title), h("div", { class: "grow" }),
-        v.zoomSel = h("select", { class: "small", title: "zoom", onchange: (e) => { v.zoom = +e.target.value; localStorage.setItem(v.cam ? "camHeadZoom" : "camUpZoom", v.zoom); v._draw(); } },
-          [1, 2, 3, 4, 6, 8].map((z) => h("option", { value: z, selected: z === v.zoom }, `${z}x`))),
+        v.zoomSel = h("select", { class: "small", title: "zoom: Auto = from the size of the part being looked at", onchange: (e) => {
+          v.autoZoom = e.target.value === "auto";
+          if (!v.autoZoom) v.zoom = +e.target.value;
+          localStorage.setItem(v.cam ? "camHeadZoomA" : "camUpZoomA", e.target.value); v._draw();
+        } },
+          h("option", { value: "auto", selected: v.autoZoom }, "Auto"),
+          [1, 2, 3, 4, 6, 8].map((z) => h("option", { value: z, selected: !v.autoZoom && z === v.zoom }, `${z}x`))),
         h("label", {}, live, " live"), h("button", { class: "btn small", onclick: async () => { await lightFor(v); v.grab(); } }, "Grab")), v.el);
     };
     this.vac = [1, 2, 3, 4].map(() => h("progress", { max: 100, value: 0 }));
@@ -194,12 +205,13 @@ const JobRun = {
       oninput: (e) => (this.speedLbl.textContent = `Current Speed (${e.target.value}%)`),
       onchange: (e) => API.run("xy_speed", { v: e.target.value, force: 9 }) });
     this.startBtn = h("button", { class: "btn primary bigbtn", onclick: () => this.startPause() }, "Start");
-    this.stepBtn = h("button", { class: "btn bigbtn", onclick: () => this.stepOnce() }, "Step");
-    this.stopBtn = h("button", { class: "btn danger bigbtn", onclick: () => this.ctl("stop") }, "Stop");
-    this.exitBtn = h("button", { class: "btn bigbtn", onclick: () => this.exit() }, "Exit");
+    this.stepBtn = h("button", { class: "btn bigbtn", onclick: () => this.stepOnce() }, icon("list"), "Step");
+    this.stopBtn = h("button", { class: "btn danger bigbtn", onclick: () => this.ctl("stop") }, icon("stop"), "Stop");
+    this.exitBtn = h("button", { class: "btn bigbtn", onclick: () => this.exit() }, icon("out"), "Exit");
     this.resumeBtn = h("button", { class: "btn", title: "continue where the job stopped", onclick: () => this.start(true) }, "Continue ▶");
     const right = h("div", { class: "runright" },
       h("div", { class: "card cams" }, camBox(this.camHead, "Head camera"), camBox(this.camUp, "Up camera")),
+      this.qBox,                       // a question (a mark not found, a failed pick) right under the cameras
       h("div", { class: "card" },
         h("div", { class: "vacgrid" }, this.vac.flatMap((p, i) => [h("label", {}, `Pressure${i + 1}`), p])),
         h("div", { class: "row" }, this.speedLbl, this.speed),
@@ -213,7 +225,6 @@ const JobRun = {
           this.resumeBtn),
         this.resumeBox,
         h("details", {}, h("summary", {}, "Editing during a pause"), h("div", { class: "muted", style: "font-size:12px" }, JOB_EDIT_NOTE))),
-      this.qBox,
       h("div", { class: "card logcard" }, this.logBox));
 
     root.replaceChildren(h("div", { class: "runwrap" },
@@ -265,11 +276,12 @@ const JobRun = {
     const job = { panels: [], comps: [], stacks: {} };
     this.jobLines.forEach((line, no) => {
       const t = line.split(","), tag = t[0].trim(), k = t.slice(1);
-      if (tag === "stack" && k.length >= 14) job.stacks[+k[0]] = { type: +k[1], vision: +k[14], skip: /^yes$/i.test((k[+k[1] === 1 ? 22 : 19] || "").trim()) };
+      if (tag === "stack" && k.length >= 14) job.stacks[+k[0]] = { type: +k[1], vision: +k[14], skip: /^yes$/i.test((k[+k[1] === 1 ? 22 : 19] || "").trim()),
+        L: +k[+k[1] === 1 ? 29 : 26] || 0, W: +k[+k[1] === 1 ? 30 : 27] || 0 };
       else if (tag === "mirror" && k.length >= 4) job.panels.push({ x: +k[0], y: +k[1], angle: +k[2], skip: Math.max(0, ["No", "Yes", "Auto"].indexOf(k[3].trim())), no });
       else if (tag === "comp" && k.length >= 9) job.comps.push({ stack: +k[0], nozzle: +k[1], name: k[2], value: k[3], footprint: k[4], x: +k[5], y: +k[6], rot: +k[7], skip: /^(yes|1|true)$/i.test(k[8].trim()), no });
     });
-    job.comps.forEach((c, i) => { c.i = i; const st = job.stacks[c.stack]; c.hidden = c.skip || !!(st && st.skip); });
+    job.comps.forEach((c, i) => { c.i = i; const st = job.stacks[c.stack]; c.hidden = c.skip || !st || !!st.skip; });   // no feeder (0, or one not in the file): the run does not place it either
     this.job = job;
     this.visible = job.comps.filter((c) => !c.hidden);          // the parts that will really be placed
   },
@@ -322,6 +334,7 @@ const JobRun = {
     const c = this.visible[this.sel];
     if (!c) return;
     if (!API.st.haveControl && !(await API.take())) return;
+    this.zoomFor(this.camHead, this.partSize(c), 0);
     this.marksOk = this.marksOk || {};
     if (!this.marksOk[this.path]) {
       if (!confirm("Find the board's fiducials first? The head camera visits each mark (once per mounted job), so the part is shown where it really lands, board shift and turn included.")) return;
@@ -389,6 +402,20 @@ const JobRun = {
 
   // keys on the mount screen (not while typing, not while a job runs): Up / Down = previous / next part
   // with Vision Align, Space = Set X/Y here
+  // Auto zoom: the part (its longer side, and how far it sits from the middle) fills about 40 % of the
+  // picture; a whole number, 1x .. 8x. size / off in mm; nothing known: the camera's usual zoom
+  zoomFor(v, size, off) {
+    if (!v || !v.autoZoom) return;
+    let z = v.cam ? 1 : 4;
+    if (size > 0) {
+      const view = v.size / Cfg.pxmm(v.cam);                       // mm across the whole picture
+      z = Math.max(1, Math.min(8, Math.floor(view / (2.5 * size + 2 * (off || 0)))));
+    }
+    if (z !== v.zoom) { v.zoom = z; v._draw(); }
+    if (v.zoomSel && v.zoomSel.options[0]) v.zoomSel.options[0].textContent = `Auto (${z}x)`;
+  },
+  // a part's size from its feeder's line (part size L x W), 0 when it has none
+  partSize(c) { const st = c && this.job.stacks[c.stack]; return st ? Math.max(st.L || 0, st.W || 0) : 0; },
   markQ() { const s = this.last && this.last.s; return !!(s && s.question && /^Mark/.test(s.question.text)); },
   key(ev) {
     if (location.hash !== "#job" || !this.mounted || /INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName)) return;
@@ -560,6 +587,11 @@ const JobRun = {
         this.imgSeq[k] = seq[k];
         const inf = (s.img_info || {})[k];
         cam.overlay = null; cam.label = () => ["job picture"];
+        if (inf && inf.seq === seq[k]) {
+          if (inf.four) this.zoomFor(cam, 16, 0);               // all four nozzles: the whole picture
+          else if (inf.valid) this.zoomFor(cam, Math.max(inf.w || 0, inf.h || 0), Math.hypot(inf.x || 0, inf.y || 0));
+          else this.zoomFor(cam, this.partSize(this.job.comps.find((c) => c.name === inf.name)), 0);
+        }
         if (inf && inf.four && inf.seq === seq[k]) {     // the 4-up shot: every part, its nozzle's axis, its turn
           cam.label = () => [inf.parts.map((q) => `${q.name} (${q.nozzle}): ${q.valid ? `${q.angle > 0 ? "+" : ""}${fmt(q.angle, 1)}°` : "not recognised"}`).join("   ")];
           cam.overlay = (g, toC, sc) => {
@@ -621,13 +653,45 @@ const JobRun = {
     const q = s.question;
     if (q && !this.qBox.dataset.q) {
       this.qBox.dataset.q = q.text;
-      this.qBox.replaceChildren(h("div", { class: "card alert" }, h("b", {}, "Attention!"), h("p", {}, q.text),
-        h("div", { class: "row" }, q.buttons.map((b) => h("button", { class: "btn" + (b === "yes" ? " primary" : b === "no" ? " danger" : ""), onclick: async () => {
-          await API.req("POST", `/api/job/answer?a=${b}`).catch(() => {}); this.qBox.dataset.q = ""; this.qBox.replaceChildren();
-        } }, (/^Mark/.test(q.text) ? { yes: "Yes: the crosshair is on the mark", no: "No (stop the job)", ignore: "Search again" }
-          : { yes: "Yes (try again)", no: "No (stop the job)", ignore: "Ignore (skip)" })[b])))));
-      if (/^Mark/.test(q.text)) {                       // the camera live with its lamp, to bring the crosshair onto the mark
+      const answer = async (b) => { await API.req("POST", `/api/job/answer?a=${b}`).catch(() => {}); this.qBox.dataset.q = ""; this.qBox.replaceChildren(); };
+      const isMark = /^Mark/.test(q.text);
+      if (isMark) {
+        // the mark was not found: its place given by hand. The head camera is live; the operator brings the
+        // crosshair onto the mark (jog buttons, arrow keys, a click in the head picture, or Centre on the
+        // circle when the mark is somewhere in the picture) and takes that point
+        const no = (/^Mark (\d+)/.exec(q.text) || [])[1] || "";
+        const step = h("select", { class: "small", title: "how far one press moves the head" }, [["0.1", "0.1 mm"], ["0.5", "0.5 mm"], ["1", "1 mm"], ["5", "5 mm"]].map(([v, t]) => h("option", { value: v, selected: v === "0.5" }, t)));
+        const jog = (dx, dy) => API.run("rel", { x: dx * +step.value, y: dy * +step.value, slow: 1 }).then(() => App.poll()).then(() => { if (!this.camHead.live) this.camHead.grab(); });
+        const jb = (t, dx, dy, title) => h("button", { class: "btn", title, onclick: () => jog(dx, dy) }, t);
+        const circ = h("button", { class: "btn", title: "the round mark nearest the picture's middle is found and the camera moved onto it" }, icon("mark"), "Centre on the circle");
+        const note = h("div", { class: "hint" }, "");
+        circ.onclick = async () => {
+          circ.disabled = true; note.textContent = "looking for the circle …";
+          try {
+            const r = await API.req("POST", `/api/align/circle?client=${API.st.client}`);
+            await App.poll();
+            note.textContent = `circle Ø ${fmt(r.d, 2)} mm centred at ${fmt(r.x, 3)}, ${fmt(r.y, 3)}: press "Use this point" if it is the mark`;
+          } catch (e) { note.textContent = "no circle found here: " + e.message; }
+          circ.disabled = false;
+        };
+        this.qBox.replaceChildren(h("div", { class: "card alert markbox" },
+          h("b", {}, icon("mark"), `Mark ${no} was not found`),
+          h("ol", { class: "steps-how" },
+            h("li", {}, "Bring the head camera's crosshair onto the mark: the buttons below, the arrow keys, or a click in the head picture."),
+            h("li", {}, "If the mark is in the picture, Centre on the circle puts the crosshair exactly on it."),
+            h("li", {}, "Press Use this point.")),
+          h("div", { class: "jogrow" }, jb("◀", -1, 0, "X−"), h("div", { class: "jogud" }, jb("▲", 0, 1, "Y+"), jb("▼", 0, -1, "Y−")), jb("▶", 1, 0, "X+"), step, circ),
+          note,
+          h("div", { class: "btnrow" },
+            h("button", { class: "btn primary", onclick: () => answer("yes") }, icon("check"), "Use this point"),
+            h("button", { class: "btn", onclick: () => answer("ignore") }, "Search again"),
+            h("button", { class: "btn danger", onclick: () => answer("no") }, "Stop the job"))));
+        this.zoomFor(this.camHead, 1.2, 1.5);                       // the mark (about 1 mm) and room to find it
         API.run("led", { v: +Cfg.get("PadAlign/nLed", 3) || 3 }).then(() => this.camHead.start());
+      } else {
+        this.qBox.replaceChildren(h("div", { class: "card alert" }, h("b", {}, "Attention!"), h("p", {}, q.text),
+          h("div", { class: "row" }, q.buttons.map((b) => h("button", { class: "btn" + (b === "yes" ? " primary" : b === "no" ? " danger" : ""), onclick: () => answer(b) },
+            ({ yes: "Yes (try again)", no: "No (stop the job)", ignore: "Ignore (skip)" })[b])))));
       }
     } else if (!q && this.qBox.dataset.q) { this.qBox.dataset.q = ""; this.qBox.replaceChildren(); if (this.camHead.live) this.camHead.stop(); }
   },

@@ -17,7 +17,8 @@ const Settings = {
     }
     const tabs = [["general", "General"], ["vision", "Vision"], ["job", "Job"], ["padalign", "Pad alignment"], ["leadvision", "Lead vision"], ["positions", "Positions"], ["stacks", "Stacks"], ["feeders", "Feeders"], ["peelers", "Peelers"], ["kiosk", "This PC's screen"], ["raw", "Raw file"]];
     root.append(h("div", { class: "tabs" }, tabs.map(([k, t]) =>
-      h("button", { class: "btn" + (k === this.tab ? " on" : ""), onclick: () => { this.tab = k; App.show(); } }, t))));
+      h("button", { class: "btn" + (k === this.tab ? " on" : ""), onclick: () => { this.tab = k; App.show(); } },
+        icon(({ general: "sliders", vision: "eye", job: "play", padalign: "pads", leadvision: "leads", positions: "pin", stacks: "reel", feeders: "reel", peelers: "reel", kiosk: "screen", raw: "code" })[k]), t))));
     const body = h("div", { class: "card" });
     root.append(body);
     this[this.tab](body);
@@ -42,7 +43,7 @@ const Settings = {
     return h("input", { value: Cfg.get(key, ""), placeholder, style: "width:320px", onchange: (e) => { Cfg.set(key, e.target.value.trim(), "s"); this.updDirty(); } });
   },
   table(b, rows, note) {
-    b.append(h("table", {}, rows.map(([l, f]) => h("tr", {}, h("td", {}, l), h("td", {}, f)))));
+    b.append(setRows(rows));
     if (note) b.append(h("div", { class: "muted", style: "margin-top:8px" }, note));
   },
 
@@ -101,6 +102,7 @@ const Settings = {
       el = h("input", { type: "number", value: type === "f" ? +Number(v).toFixed(opts.dec ?? 3) : v, min: opts.min, max: opts.max,
         step: opts.step || (type === "f" ? 0.01 : 1), onchange: (e) => set(e.target.value) });
     }
+    el.dataset.key = key;
     return el;
   },
 
@@ -113,7 +115,7 @@ const Settings = {
       ["Up-camera brightness, one nozzle (exposure = 50 × value)", this.field("Default/fBrightness", "f", { choices: [10, 20, 30, 40, 50, 75, 100, 150, 200, 250, 300], scale: 100, unit: " %" })],
       ["Up-camera brightness, four nozzles", this.field("Default/fBrightness4", "f", { choices: [10, 20, 30, 40, 50, 75, 100, 150, 200, 250, 300], scale: 100, unit: " %" })],
     ];
-    b.append(h("table", {}, rows.map(([l, f]) => h("tr", {}, h("td", {}, l), h("td", {}, f)))),
+    b.append(setRows(rows),
       h("div", { class: "row" },
         h("button", { class: "btn", onclick: () => API.run("xy_speed", { v: Cfg.get("Default/nRunSpeed", 80), force: 9 }, "XY speed sent") }, "Send speed to the machine")));
   },
@@ -134,7 +136,7 @@ const Settings = {
       ["Up camera scale (px per mm; NeoDen4: 34.5)", this.field("Vision/fUpPxPerMm", "f", { def: 34.5, min: 10, max: 100, step: 0.01, dec: 3 })],
       ["Head camera scale (px per mm; NeoDen4: 112)", this.field("Vision/fHeadPxPerMm", "f", { def: 112, min: 30, max: 300, step: 0.01, dec: 3 })],
     ];
-    b.append(h("table", {}, rows.map(([l, f]) => h("tr", {}, h("td", {}, l), h("td", {}, f)))),
+    b.append(setRows(rows),
       h("div", { class: "muted", style: "margin-top:8px" },
         "NeoDen4 used fixed 0.8–1.25 and paired width/height only for exact 0/180 or ±90° stacks; here the stack angle is rounded to the nearest 90°. " +
         "Angle check: after turning the nozzle by the measured angle, a new up-camera image must show the part square within the tolerance and at the expected offset; " +
@@ -150,7 +152,7 @@ const Settings = {
       ["Wait until the camera image is still after a move", this.field("Job/bSettle", "b", { def: true })],
       ["Still: largest shift between frames (px)", this.field("Job/fSettleTolPx", "f", { def: 0.3, min: 0.05, max: 5, step: 0.05, dec: 2 })],
       ["Still: give up after (s)", this.field("Job/fSettleMaxS", "f", { def: 1.0, min: 0.1, max: 5, step: 0.1, dec: 1 })],
-      ["See, turn, see: every part shot on its own is looked at again after turning, until its turn reads right (all feeders)", this.field("Job/bSeeTurnSee", "b", { def: true })],
+      ["Two-stage vision for every part: looked at again after turning, until its turn reads right (slower). Off: only the feeders and parts set to it (Feeder settings, Components)", this.field("Job/bSeeTurnSee", "b", { def: false })],
       ["Assign plans the nozzles so up to four parts are picked together (each part a nozzle its feeder allows, not yet used in the cycle)", this.field("Job/bPlanNozzles", "b", { def: true })],
       ["Fill a pick cycle from up to this many parts ahead when the next part's nozzle is taken (0: strictly in order)", this.field("Job/nCycleLookahead", "i", { def: 12 })],
       ["Feeders of different speeds share a pick cycle (at the slowest of them)", this.field("Job/bCycleMixSpeeds", "b", { def: true })],
@@ -170,7 +172,7 @@ const Settings = {
       ["Vision log: largest size (MB)", this.field("Job/nVisionLogMaxMB", "i", { def: 2000, min: 50, max: 100000, step: 50 })],
       ["Board transform from the fiducials", this.choice("Job/sMarkFit", "affine", [["neoden", "2 marks: shift + turn (NeoDen4)"], ["affine", "3+ marks: also scale and skew"], ["bilinear", "4+ marks at the corners: also a warped board"]])],
     ];
-    b.append(h("table", {}, rows.map(([l, f]) => h("tr", {}, h("td", {}, l), h("td", {}, f)))),
+    b.append(setRows(rows),
       h("div", { class: "muted", style: "margin-top:8px" },
         "NeoDen4 always beeped at the end of a job and always waited 250 ms before an image. " +
         "The manual Buzzer button works even with the sound off."));

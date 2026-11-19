@@ -38,6 +38,64 @@ def _open(img, n):
     return cv2.dilate(cv2.erode(img, k, iterations=n), k, iterations=n)
 
 
+DARK_THR = 25       # grey levels darker than the empty nozzle that are still the part
+
+
+def part_mask(frame, background, thr, dark=DARK_THR, grow=34, window=None):
+    """the part on a nozzle against the empty nozzle's picture: brighter by more than thr (NeoDen4's
+    frame - background), or darker by more than `dark`. A black body (an M7 / SMA diode: 34 grey on a
+    big nozzle's light disc of 72) is darker than what it covers: brighter-only saw just its two
+    terminals, 1.4 mm wide, or nothing in the 4-up shot ("nozzle empty", then suction failures).
+    The darker part counts only within `grow` px (~1 mm) of the brighter part (the M7's terminals), and
+    after what its rows and columns darkened by OUTSIDE that box is taken off (a bright part darkens the
+    rest of its rows on this sensor: an 0805 read 15.30 x 1.88 mm, stretched along its rows to the
+    search's edge). window = (x, y, w, h): the mask of that part of the frame only (the rows' and
+    columns' darkening still read from the whole frame). Only the box is worked on: 1 ms, not 30."""
+    H, W = frame.shape
+    wx, wy, ww, wh = window if window is not None else (0, 0, W, H)
+    wx, wy = max(0, int(wx)), max(0, int(wy))
+    wx1, wy1 = min(W, wx + int(ww)), min(H, wy + int(wh))
+    f, g = frame[wy:wy1, wx:wx1], background[wy:wy1, wx:wx1]
+    m = _threshold(cv2.subtract(f, g), thr)
+    if not dark or m.size == 0:
+        return m
+    nz = cv2.findNonZero(_open(m, 2))
+    if nz is None or not _same_light(frame, background, dark):
+        return m
+    bx, by, bw, bh = cv2.boundingRect(nz)
+    x0, x1 = max(0, bx - grow), min(m.shape[1], bx + bw + grow)       # in the window
+    y0, y1 = max(0, by - grow), min(m.shape[0], by + bh + grow)
+    X0, X1, Y0, Y1 = x0 + wx, x1 + wx, y0 + wy, y1 + wy               # in the frame
+    d = background[Y0:Y1, X0:X1].astype(np.int16) - frame[Y0:Y1, X0:X1]
+    cols = np.r_[np.arange(0, X0, 4), np.arange(X1, W, 4)]            # outside the box, every 4th pixel
+    rows = np.r_[np.arange(0, Y0, 4), np.arange(Y1, H, 4)]
+    base = 0
+    if len(cols) >= 16:
+        ro = np.median(background[Y0:Y1][:, cols].astype(np.int16) - frame[Y0:Y1][:, cols], axis=1)
+        d -= ro.astype(np.int16)[:, None]
+        base = float(np.median(ro))                                   # what the whole picture darkened by
+    if len(rows) >= 16:
+        co = np.median(background[rows, X0:X1].astype(np.int16) - frame[rows, X0:X1], axis=0)
+        d -= (co - base).astype(np.int16)[None, :]
+    m[y0:y1, x0:x1] |= ((d > dark) * 255).astype(np.uint8)
+    return m
+
+
+def _same_light(frame, background, dark):
+    """the frame was taken at the background's exposure and light: its lit pixels away from the middle
+    (where no part sits) are not darker than the background's. A run read 19.5 x 19.6 mm for an M7
+    when they were not; then only brighter counts, as NeoDen4. Every 4th pixel: enough, and fast"""
+    b, f = background[::4, ::4], frame[::4, ::4]
+    h, w = b.shape
+    outer = np.ones((h, w), bool)
+    outer[int(0.2 * h):int(0.8 * h), int(0.2 * w):int(0.8 * w)] = False
+    lit = outer & (b > 40)
+    if np.count_nonzero(lit) >= 60:
+        return float(np.median(b[lit].astype(np.int16) - f[lit])) <= dark / 2
+    d = _threshold(cv2.subtract(b, f), dark)
+    return cv2.countNonZero(d) <= 0.35 * d.size
+
+
 def merged_contour_points(roi):
     """all points of all contours (RETR_TREE, CHAIN_APPROX_SIMPLE), or None"""
     cs, _ = cv2.findContours(roi.copy(), cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
@@ -76,14 +134,14 @@ def analyze_nozzles(frame, background, flags, sub_pos, k=UP_PX_PER_MM):
     """all four nozzles in one up-camera shot (CImgBoard::analyzeNozzles).
     frame, background: oriented 1024x1024; flags: 4 bools; sub_pos: 4 (x, y) px nozzle centres
     (Config.ini Position/dPosSubMouses0..3)."""
-    work = _open(_threshold(cv2.subtract(frame, background), 30), 1)
     out = []
     for i in range(4):
         if not flags[i]:
             out.append(PartResult(False))
             continue
         rx, ry = int(sub_pos[i][0] - 100), int(sub_pos[i][1] - 100)
-        pts = merged_contour_points(work[max(ry, 0):ry + 200, max(rx, 0):rx + 200])
+        ax, ay = max(rx, 0), max(ry, 0)                 # each nozzle's own window: its own darker part
+        pts = merged_contour_points(_open(part_mask(frame, background, 30, window=(ax, ay, rx + 200 - ax, ry + 200 - ay)), 1))
         if pts is None:
             out.append(PartResult(False))
             continue
@@ -97,30 +155,52 @@ def analyze_nozzles(frame, background, flags, sub_pos, k=UP_PX_PER_MM):
 
 def tip_centre(img, x, y, search=60, area=170):
     """an empty nozzle's tip near (x, y) px: the dark spot (the tip's hole, or a big nozzle's dark
-    inside) nearest there, the centroid of its filled area, so the nozzle's turn does not change it.
-    Needs a bright exposure (~600 for an empty nozzle). Returns (x, y, radius) px or None."""
+    inside) NEAREST there, the centroid of its filled area, so the nozzle's turn does not change it.
+    Needs a bright exposure (~600 for an empty nozzle). Returns (x, y, radius) px or None.
+
+    Every dark spot in the search square is a candidate (each local minimum, grown at 30 % of the way
+    from its own darkness to the bright level) and the one nearest (x, y) is taken. Before, the single
+    darkest pixel decided: in the 4-up shot a small nozzle's own body, seen from the side behind the tip,
+    is a dark blob 5 times the hole's size 1.6 mm from it, and it was taken in 4 turns of 6 (BOARD-A,
+    2026-11-20): it does not move when the nozzle turns, so it passed as a perfect axis."""
     h, w = img.shape
     area = int(min(area, x, y, w - x, h - y))            # a nozzle near the image edge (4-up shot)
     if area < search + 20:
         return None
     X0, Y0 = int(round(x)) - area, int(round(y)) - area
     R = cv2.GaussianBlur(img[Y0:Y0 + 2 * area, X0:X0 + 2 * area], (0, 0), 1.5).astype(np.float32)
-    c = R[area - search:area + search, area - search:area + search]
-    sy, sx = np.unravel_index(np.argmin(c), c.shape)
-    sx, sy = sx + area - search, sy + area - search
-    lo, hi = float(R[sy, sx]), float(np.percentile(R, 90))
+    a0 = area - search
+    c = R[a0:area + search, a0:area + search]
+    lo, hi = float(c.min()), float(np.percentile(R, 90))
     if hi - lo < 15:
         return None
-    _, lab, stats, _ = cv2.connectedComponentsWithStats((R < lo + 0.3 * (hi - lo)).astype(np.uint8), connectivity=8)
-    L = lab[sy, sx]
-    x0, y0, ww, hh, _ = stats[L]
-    if x0 == 0 or y0 == 0 or x0 + ww >= 2 * area or y0 + hh >= 2 * area:
-        return None
-    cs, _ = cv2.findContours((lab == L).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-    filled = np.zeros(R.shape, np.uint8)
-    cv2.drawContours(filled, cs, -1, 1, -1)
-    m = cv2.moments(filled, True)
-    return X0 + m["m10"] / m["m00"], Y0 + m["m01"] / m["m00"], math.sqrt(m["m00"] / math.pi)
+    # the candidates: local minima of the search square that are really dark
+    seeds = np.argwhere((c == cv2.erode(c, np.ones((7, 7), np.uint8))) & (c < lo + 0.5 * (hi - lo)))
+    seeds = sorted(((float(np.hypot(sx + a0 - area, sy + a0 - area)), int(sx) + a0, int(sy) + a0) for sy, sx in seeds))[:16]
+    best, seen = None, []
+    for _, sx, sy in seeds:
+        if any(m[sy, sx] for m in seen):                  # in a spot already looked at
+            continue
+        v = float(R[sy, sx])
+        _, lab, stats, _ = cv2.connectedComponentsWithStats((R < v + 0.3 * (hi - v)).astype(np.uint8), connectivity=8)
+        L = lab[sy, sx]
+        comp = lab == L
+        seen.append(comp)
+        x0, y0, ww, hh, _ = stats[L]
+        if x0 == 0 or y0 == 0 or x0 + ww >= 2 * area or y0 + hh >= 2 * area:
+            continue
+        cs, _ = cv2.findContours(comp.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        filled = np.zeros(R.shape, np.uint8)
+        cv2.drawContours(filled, cs, -1, 1, -1)
+        m = cv2.moments(filled, True)
+        r = math.sqrt(m["m00"] / math.pi)
+        if r < 4.0:                                        # a speck of dust on the light disc, not a hole
+            continue
+        cx, cy = m["m10"] / m["m00"], m["m01"] / m["m00"]
+        d = math.hypot(cx - area, cy - area)
+        if best is None or d < best[0]:
+            best = (d, X0 + cx, Y0 + cy, r)
+    return best[1:] if best else None
 
 
 def fit_circle(pts):
@@ -173,15 +253,57 @@ def roi_half_size(pkg_x_mm, pkg_y_mm, k=UP_PX_PER_MM):
 
 def analyze_nozzle(frame, background, p, k=UP_PX_PER_MM, thr=50):
     """one nozzle centred in the frame (CImgBoard::analyzeNozzle); p = ROI half size in px;
-    thr = threshold on (frame - background), NeoDen4: 50"""
-    work = _open(_threshold(cv2.subtract(frame, background), thr), 2)
-    r, c = work.shape
+    thr = threshold on (frame - background), NeoDen4: 50; a part darker than the background by
+    DARK_THR counts too (part_mask)"""
+    r, c = frame.shape
     x0, y0 = c // 2 - p, r // 2 - p
-    pts = merged_contour_points(work[y0:y0 + 2 * p, x0:x0 + 2 * p])
+    mask = _open(part_mask(frame, background, thr, window=(x0, y0, 2 * p, 2 * p)), 2)
+    pts = merged_contour_points(mask)
     if pts is None:
         return PartResult(False, empty=True)
     cx, cy, w, h, a = neoden_rect(pts)
+    f = _fine_rect(frame, background, mask, (x0, y0), (cx, cy, w, h, a), thr)
+    if f is not None:
+        cx, cy, w, h, a = f
     return PartResult(True, (cx - p) / k, (p - cy) / k, w / k, h / k, a, (cx + x0, cy + y0, w, h, a))
+
+
+FINE_UP = 4          # a small part's outline is taken again on its own patch enlarged this many times
+FINE_MAX_PX = 200    # ... parts up to this long (~6 mm on the up camera); longer ones are fine as they are
+
+
+def _fine_rect(frame, background, mask, origin, rect, thr, up=FINE_UP):
+    """a small part's rectangle again, finer: its own patch of (frame - background) enlarged `up` times
+    (the camera's soft edges then give an outline finer than a pixel) and outlined again. On the up
+    camera an 0603 is 54 x 27 px: its angle read up to 2.9 deg wrong from the pixel outline, 0.25 deg this
+    way (0805: 0.66 -> 0.21), and that angle is what the look after the turn corrects. The darker part of
+    the mask (a black body) is kept as it is, only enlarged. None when the part is big, at the window's
+    edge, or the finer outline is not the same part (then the pixel outline stands).
+    rect, and what is returned: (cx, cy, w, h, angle) in the mask's own px"""
+    cx, cy, w, h, a = rect
+    if max(w, h) > FINE_MAX_PX or min(w, h) < 4:
+        return None
+    half = int(max(w, h) / 2 + 8)
+    mx, my = int(round(cx)) - half, int(round(cy)) - half
+    if mx < 0 or my < 0 or mx + 2 * half > mask.shape[1] or my + 2 * half > mask.shape[0]:
+        return None
+    X, Y = mx + origin[0], my + origin[1]
+    d = cv2.subtract(frame[Y:Y + 2 * half, X:X + 2 * half], background[Y:Y + 2 * half, X:X + 2 * half])
+    bright = d[d > thr]
+    half_way = max(float(thr), 0.5 * float(np.percentile(bright, 80))) if bright.size else float(thr)   # the edge at half the part's own brightness: its true size
+    big = _threshold(cv2.resize(cv2.GaussianBlur(d, (3, 3), 0), None, fx=up, fy=up, interpolation=cv2.INTER_CUBIC), half_way)
+    m = mask[my:my + 2 * half, mx:mx + 2 * half]
+    dark = cv2.bitwise_and(m, cv2.bitwise_not(_threshold(d, thr)))        # what only the darker rule found
+    if cv2.countNonZero(dark):
+        big = cv2.bitwise_or(big, _threshold(cv2.resize(dark, None, fx=up, fy=up, interpolation=cv2.INTER_LINEAR), 127))
+    pts = merged_contour_points(_open(big, 2))
+    if pts is None:
+        return None
+    fx, fy, fw, fh, fa = neoden_rect(pts)
+    fx, fy, fw, fh = fx / up + mx, fy / up + my, fw / up, fh / up
+    same = (abs(fx - cx) <= 3 and abs(fy - cy) <= 3 and abs(fw - w) <= 0.15 * w + 2 and abs(fh - h) <= 0.15 * h + 2
+            and abs((fa - a + 45.0) % 90.0 - 45.0) <= 4.0)
+    return (fx, fy, fw, fh, fa) if same else None
 
 
 def _line_angle(dx, dy):
@@ -431,14 +553,19 @@ def find_mark_best(img, dmin_mm, dmax_mm, px_per_mm=HEAD_PX_PER_MM, min_dia_mm=1
     Stricter than NeoDen4 (which takes area radius / perimeter radius >= 0.8, so a square pad, 0.886,
     passed; real fiducials on a panel frame, a little out of round, pass 0.85): roundness >= min_q, the
     area fills >= min_fill of its enclosing circle (a square 0.64: this is what rejects pads),
-    and the diameter is at least min_dia_mm (a fiducial is a circle of 1 mm or more)"""
+    and the diameter is at least min_dia_mm (a fiducial is a circle of 1 mm or more). A job whose
+    mark is smaller (its whole range under min_dia_mm, e.g. 0.60 .. 0.93 mm) is searched in its own
+    range: the floor on both ends left a window of one size and that mark was never found."""
     src = cv2.pyrUp(cv2.pyrDown(img))[:img.shape[0], :img.shape[1]]
-    rmin, rmax = 0.5 * max(dmin_mm, min_dia_mm) * px_per_mm, 0.5 * max(dmax_mm, min_dia_mm) * px_per_mm
+    floor = min_dia_mm if dmax_mm >= min_dia_mm else 0.0
+    rmin, rmax = 0.5 * max(dmin_mm, floor) * px_per_mm, 0.5 * max(dmax_mm, floor) * px_per_mm
     best = MarkResult(0.0)
     for kk in range(25):
         t = 32 + 8 * kk
-        cs, _ = cv2.findContours(_threshold(src, t), cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+        cs, _ = cv2.findContours(_threshold(src, t), cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
         for c in cs:
+            if len(c) < 12:                           # a speck: no circle of 30 px radius
+                continue
             rp = int(cv2.arcLength(c, True)) / 6.28
             if rp < 30 or rp > 250:
                 continue

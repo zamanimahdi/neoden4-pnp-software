@@ -85,6 +85,32 @@ def test_errors():
         assert "camera 5 not connected" in str(e)
 
 
+
+
+def test_short_frame_is_taken_again():
+    """bytes lost on the bus: the frame is grabbed again, the cameras are not re-opened"""
+    up = FakeDev("Bcam1", pid=0x00F0)
+    cams = U.UsbCameras.open(find=lambda: [FakeDev("HCAM_V1"), up])
+    cams.window(U.UP, 1024, 1024)
+    real, state = up.read, {"short": 2}
+
+    def read(ep, n, timeout):
+        d = real(ep, n, timeout)
+        if n == 1024 * 1024 and state["short"]:
+            state["short"] -= 1
+            return d[:-3584]
+        return d
+    up.read = read
+    img = cams.grab(U.UP)
+    assert img.shape == (1024, 1024) and cams.regrabs == 2 and "short frame 1044992" in cams.last_regrab
+    state["short"] = 3                                         # more than the retries: the error goes up
+    try:
+        cams.grab(U.UP)
+        raise AssertionError("no error")
+    except U.CamError as e:
+        assert "short frame" in str(e)
+
+
 if __name__ == "__main__":
     for n, f in list(globals().items()):
         if n.startswith("test_"):

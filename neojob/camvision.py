@@ -181,8 +181,16 @@ class CameraVision:
             if rms > 2.0:
                 self.log(f"vision 4-up: nozzle {n} tips do not lie on a circle (rms {rms:.1f} px): shot alone")
                 continue
-            self.four[n] = (cx, cy)
             sx, sy = self.cfg.sub_mouses[n - 1]
+            far = math.hypot(cx - sx, cy - sy) / k
+            if far > float(self.cfg.vision("fFourUpMaxShiftMm")):
+                # BOARD-A (2026-11-19): nozzles 1 and 3 read 1.3 mm from their stored axis (another dark
+                # spot taken for the hole); every part on them was "corrected" by that and placed 1.5 mm off
+                self.four[n] = (float(sx), float(sy))
+                self.log(f"vision 4-up: nozzle {n} axis read at {cx:.1f}, {cy:.1f} px, {far:.2f} mm from the stored "
+                         f"{sx:.0f}, {sy:.0f}: not trusted, the stored axis is used")
+                continue
+            self.four[n] = (cx, cy)
             self.log(f"vision 4-up: nozzle {n} axis {cx:.1f}, {cy:.1f} px (stored {sx:.0f}, {sy:.0f}), "
                      f"runout {r / k * 1000:.0f} um")
         # the scale where the nozzles stand (the up camera's lens: ~32 px/mm in the middle, ~34 at
@@ -329,6 +337,10 @@ class CameraVision:
                 self._said = True
             n = s["nozzle"]
             pkg = runner.packages.get(st.footprint)
+            if not pkg and getattr(st, "part_l", 0) > 0 and getattr(st, "part_w", 0) > 0:
+                # the feeder's own part size: without it the whole picture was searched (15 mm round the
+                # nozzle) and a turned nozzle's own marks were read as a 15 x 4 mm part (2026-11-19)
+                pkg = (st.part_l, st.part_w)
             roi = V.roi_half_size(pkg[0], pkg[1], k) if pkg else 500
             comp = s["comp"]
             part = getattr(runner, "pads", {}).get(comp.key or comp.name)
@@ -343,6 +355,7 @@ class CameraVision:
 
             def shoot():
                 self.mb.move_xy(*self.cfg.nozzle_positions[n - 1], timeout=20)
+                self.setup(UP, self.cfg.up_exposure(), 1024)     # the background's exposure (a 4-up shot sets its own)
                 img = self.grab(UP)
                 bg = self.bg.get(n)
                 if bg is None or bg.shape != img.shape:

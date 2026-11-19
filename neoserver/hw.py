@@ -331,6 +331,86 @@ class Machine:
         return {}
 
 
+class _HealingCam:
+    """what Cameras.dev() hands out (vision, align, jobs, feeder setup): the backend's methods, but a
+    failed grab closes the backend, opens it again with the window / exposure / gain last set on
+    each camera, and grabs once more. The caller holds Cameras.lock, as for the backend itself."""
+
+    def __init__(self, owner):
+        self.o, self.last, self.sent = owner, {}, {}
+
+    @staticmethod
+    def _id(cam):
+        """the camera's id whichever way it is named (0 / 1, or 0x80 | id)"""
+        return cam & 0x7F if cam & 0x80 else (5 if cam == 0 else 1)
+
+    def _b(self):
+        if self.o.cam is None:
+            self.o.dev()                            # opens, then reapply() below
+        return self.o.cam
+
+    def reapply(self):
+        """after the cameras were opened (again): what was last set on each, over the viewing settings"""
+        self.sent = {}
+        for cid, calls in list(self.last.items()):
+            for name in ("window", "exposure", "gain"):
+                if name in calls:
+                    cam, args = calls[name]
+                    try:
+                        getattr(self.o.cam, name)(cam, *args)
+                        self.sent.setdefault(cid, {})[name] = args
+                    except Exception:
+                        pass
+
+    def _set(self, name, cam, *args):
+        """a setting the camera already has is not sent again: each one sleeps 50 ms (a window 100),
+        and vision sets window + exposure before every picture"""
+        b, cid = self._b(), self._id(cam)
+        if self.sent.get(cid, {}).get(name) == args:
+            return None
+        r = getattr(b, name)(cam, *args)
+        if name == "window":                        # a new window: exposure and gain are sent again after it
+            self.sent[cid] = {}
+        self.sent.setdefault(cid, {})[name] = args
+        self.last.setdefault(cid, {})[name] = (cam, args)
+        return r
+
+    def window(self, cam, w=1024, h=1024):
+        return self._set("window", cam, w, h)
+
+    def exposure(self, cam, value):
+        return self._set("exposure", cam, value)
+
+    def gain(self, cam, value):
+        return self._set("gain", cam, value)
+
+    def grab(self, cam, *a, **k):
+        try:
+            b = self._b()
+            n0 = getattr(b, "regrabs", 0)
+            img = b.grab(cam, *a, **k)
+            if getattr(b, "regrabs", 0) != n0 and time.monotonic() - getattr(self, "_told", 0.0) > 30.0:
+                self._told = time.monotonic()       # a frame taken twice: said at most every 30 s
+                self.o.log(f"camera: {getattr(b, 'last_regrab', 'a frame was taken again')} ({b.regrabs} since the cameras were opened)")
+            return img
+        except Exception as e:
+            self.sent = {}
+            self.o.log(f"camera: grab camera {cam} failed ({e}): opening the cameras again")
+            self.o.drop()
+            try:
+                return self._b().grab(cam, *a, **k)
+            except Exception:
+                self.o.drop()                      # still failing: the next call starts from a closed backend
+                raise
+
+    def reset(self, cam):
+        self.sent.pop(self._id(cam), None)          # a reset camera: every setting sent again
+        return self._b().reset(cam)
+
+    def __getattr__(self, name):
+        return getattr(self._b(), name)
+
+
 class Cameras:
     """camera backend + BMP output turned like NeoDen4.exe (up: transpose + flip, head: flip)"""
 
@@ -388,14 +468,28 @@ class Cameras:
                 except Exception:
                     pass
             self.log("camera: " + self.cam.info())
-        return self.cam
+            if getattr(self, "_healing", None) is not None:
+                self._healing.reapply()
+        if getattr(self, "_healing", None) is None:
+            self._healing = _HealingCam(self)
+        return self._healing
+
+    def drop(self):
+        """close the backend before forgetting it: a USB handle only dropped kept the device claimed,
+        and every later open read "[Errno 16] Resource busy" until neoserver restarted (2026-11-18)"""
+        c, self.cam = self.cam, None
+        if c is not None:
+            try:
+                c.close()
+            except Exception:
+                pass
 
     def info(self):
         try:
             with self.lock:
                 return self.dev().info()
         except Exception as e:
-            self.cam = None
+            self.drop()
             return f"camera: {e}"
 
     def auto_exposure(self, cam, target=200, tol=30, steps=7, lo=1, hi=400):
@@ -464,7 +558,7 @@ class Cameras:
                 else:
                     raw = self.dev().grab(cam)
             except Exception:
-                self.cam = None                     # reconnect next time
+                self.drop()                         # reconnect next time
                 raise
         img = np.flip(raw.T, (0, 1)) if (cam & 0x7F) == 0 and raw.shape[0] == raw.shape[1] else np.flip(raw, (0, 1))
         if self.view_file:                                   # the camera's pixel map, when it is on

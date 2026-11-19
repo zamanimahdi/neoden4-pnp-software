@@ -11,6 +11,30 @@
 // 19 skip, 20 size check; tray: 16 columns, 17 rows, 18 / 19 right top X / Y, 20 / 21 counters,
 // 22 skip, 23 size check.
 const StackEdit = {
+  // the feeder form: what each field is (shown behind its "?")
+  FIELD_HELP: {
+    "Parts": "The parts of the job that are picked from this feeder.",
+    "Footprint": "The part's package (0603, SOT-23 ...). Used for its size when the feeder has no own part size.",
+    "Value": "The part's value or name, as in the job's part list.",
+    "Feeder ID exchange": "Swap this feeder's number with another one's: the parts follow.",
+    "Pick X / Y": "Where nozzle 1 picks the part (machine mm). Each allowed nozzle must be able to reach it.",
+    "Start X / Y": "The tray's first cell (machine mm).",
+    "Right top X / Y": "The tray's last cell, diagonally opposite the first.",
+    "Pick angle": "How the part lies in its pocket against the board's 0 degrees. Turn by 90 if all its parts would sit across their pads.",
+    "Feed rate (mm)": "How far the tape moves for one part: 4 mm for small parts, more for bigger pockets.",
+    "Feed torque": "How strongly the feeder pulls the tape.",
+    "Peel strength": "How strongly the cover tape is pulled off.",
+    "Pick height (mm)": "How far the nozzle comes down to pick. Measure height sets it from the part itself.",
+    "Pick delay (ms)": "How long the nozzle waits on the part before lifting it.",
+    "Place height (mm)": "NeoDen4's place height. With a board height map the depth comes from the board and the part's height instead.",
+    "Place delay (ms)": "How long the nozzle stays on the part after letting it go.",
+    "Vacuum": "Check with the vacuum that a part was picked.",
+    "Vision": "How the part is looked at over the bottom camera: one nozzle per picture, all nozzles in one, or a large part in two views.",
+    "Two-stage vision": "Look again after turning the part to its place angle and correct what is left. Slower; off = one look.",
+    "Part size L x W, H (mm)": "The part's own size. L x W: the search area and the size check. H: its height, used for the place depth.",
+    "Move speed (%)": "The head's speed while it carries this feeder's part.",
+    "Learnt pick point": "What the job has added to the pick point from where the parts sat on the nozzle.",
+  },
   sel: null,
   tableView: false,
 
@@ -169,7 +193,30 @@ const StackEdit = {
   form(wrap, jf, id) {
     const no = () => this.lineNo(jf, id);
     const get = (i) => (jf.lines[no()].split(",")[i + 1] || "").trim();
-    const set = (i, v) => jf.setField(no(), i, String(v));
+    // the pick point each allowed nozzle must reach (the head's point = the pick point + that nozzle's offset):
+    // said here, while it is being set, not when the job is started (neojob.reach checks the same then)
+    const reachBox = h("div", { class: "reach" });
+    const reachWhy = () => {
+      if (/^[1-9]/.test(get(31)) && +get(1) !== 1) return [];                // a bulk feeder picks in its container
+      const XM = 416.24, YM = 400.05, out = [];
+      const pts = [[+get(3), +get(4)]].concat(+get(1) === 1 ? [[+get(18), +get(19)]] : []);
+      for (const n of [...get(2)].filter((c) => "1234".includes(c)).map(Number)) {
+        const o = Cfg.offset(n);
+        for (const [x, y] of pts) {
+          const X = x + o[0], Y = y + o[1], w = [];
+          if (X < 0) w.push(`${fmt(-X, 2)} mm past X 0`); if (X > XM) w.push(`${fmt(X - XM, 2)} mm past X ${XM}`);
+          if (Y < 0) w.push(`${fmt(-Y, 2)} mm past Y 0`); if (Y > YM) w.push(`${fmt(Y - YM, 2)} mm past Y ${YM}`);
+          if (w.length) out.push(`nozzle ${n} cannot reach this point: its head position (${fmt(X, 2)}, ${fmt(Y, 2)}) is ${w.join(", ")}`);
+        }
+      }
+      return out;
+    };
+    const reachUpd = () => {
+      const w = reachWhy();
+      reachBox.replaceChildren(...w.map((t) => h("div", { class: "bad" }, "⛔ " + t)), w.length ? h("div", { class: "hint" }, "Move the pick point, or untick that nozzle below. The job will not start like this.") : "");
+      for (const i of [3, 4]) if (inputs[i]) inputs[i].classList.toggle("invalid", w.length > 0);
+    };
+    const set = (i, v) => { jf.setField(no(), i, String(v)); if ([2, 3, 4, 18, 19].includes(i)) reachUpd(); };
     const tray = +get(1) === 1;
     const skipI = tray ? 22 : 19, sizeI = tray ? 23 : 20;
     const pocketI = tray ? 28 : 25, partL = tray ? 29 : 26, partW = tray ? 30 : 27;   // ours, after the 4 thresholds
@@ -186,7 +233,8 @@ const StackEdit = {
     const txt = (i, w = 150) => h("input", { type: "text", style: `width:${w}px`, value: get(i), onchange: (e) => set(i, e.target.value.replace(/,/g, " ")) });
     const yn = (i, label) => h("label", {}, h("input", { type: "checkbox", checked: /^(yes|1|true)$/i.test(get(i)), onchange: (e) => set(i, e.target.checked ? "Yes" : "No") }), " " + label);
     const ynOn = (i, label) => h("label", {}, h("input", { type: "checkbox", checked: !/^(no|0|false)$/i.test(get(i)), onchange: (e) => set(i, e.target.checked ? "Yes" : "No") }), " " + label);   // on unless No
-    const field = (label, ...el) => h("div", { class: "sefield" }, h("span", {}, label), ...el);
+    // what each field is, behind its "?" (the list at the top of this file); a field not in the list has none
+    const field = (label, ...el) => h("div", { class: "sefield" }, h("span", {}, label, label ? help(StackEdit.FIELD_HELP[label]) : null), ...el);
     const setXY = (ix, iy, x, y, why) => {
       set(ix, (+x).toFixed(2)); set(iy, (+y).toFixed(2));
       if (inputs[ix]) inputs[ix].value = (+x).toFixed(2); if (inputs[iy]) inputs[iy].value = (+y).toFixed(2);
@@ -460,6 +508,7 @@ const StackEdit = {
         field(tray ? "Start X / Y" : "Pick X / Y", num(3), num(4),
           h("button", { class: "btn small", title: "head camera over this point", onclick: () => camTo(3, 4) }, "Align"),
           h("button", { class: "btn small", title: "the camera crosshair is on it", onclick: () => hereXY(3, 4) }, "Set here")),
+        reachBox,
         tray ? field("Right top X / Y", num(18), num(19), h("button", { class: "btn small", onclick: () => camTo(18, 19) }, "Align"),
           h("button", { class: "btn small", onclick: () => hereXY(18, 19) }, "Set here")) : null,
         tray ? field("Columns / Rows", num(16, "1", 60, 0), num(17, "1", 60, 0)) : null,
@@ -479,7 +528,7 @@ const StackEdit = {
         field("Place height (mm)", num(10)), field("Place delay (ms)", num(11, "1", 80, 0)),
         field("Vacuum", yn(12, "check"), h("span", { class: "muted", style: "font-size:12px" }, "the threshold is automatic: each pick measures the open-air and sealed levels (seal integral)")),
         field("Vision", vis, yn(sizeI, "size check (all its parts; a part can say otherwise: Components → Size check)")),
-        field("Second look", ynOn(lookI, "for Joint (4-up) parts: see, turn, see (turned to its place angle, photographed again, turned until it reads right; nothing turns after the last look). Parts shot one by one always get it (Settings → Job)")),
+        field("Two-stage vision", yn(lookI, "all its parts are looked at again after turning to the place angle and turned until they read right (slower; one look is the default). A part can say otherwise: Components → Two-stage vision")),
         field("Part size L x W, H (mm)", num(partL, "0.05", 70), num(partW, "0.05", 70), num(partH, "0.05", 60), this.pkgPicker(get, set, inputs, partL, partW, partH),
           h("button", { class: "btn small", title: "picks a part from this feeder, measures it on the bottom camera, puts it back: the size is kept in this job only (not the library)", onclick: measurePart }, "Measure from the part"), measureOut,
           h("span", { class: "muted", style: "font-size:12px" }, "with size check: the up camera measures the part; a part of another size (picked on its side) goes to the trash and another is picked. H: the part's height (the Joint picture's perspective correction). Empty / 0 = by the feeder's footprint in the library")),
@@ -495,6 +544,7 @@ const StackEdit = {
     wrap.append(camCol, form);
     if (!Cfg.loaded) Cfg.load().catch(() => {});
     // live picture (and live pocket finding) while this page is open; the lamp on when we have control
+    reachUpd();
     // a feeder chosen in the list: the camera goes to its pick point by itself (lamp on, live picture)
     if (this._embed) return;                                // inside a bulk feeder's form: its camera is the one
     (async () => {

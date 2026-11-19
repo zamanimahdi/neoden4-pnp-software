@@ -149,3 +149,64 @@ if __name__ == "__main__":
             n += 1
             print("ok", name)
     print(f"{n} vision tests passed")
+
+
+def test_black_part_on_a_light_nozzle_disc():
+    # BOARD-A feeder 23 (M7, SMA) on nozzle 4 (2026-11-19): grey levels as in the real picture
+    k = 34.0
+    bg = np.full((1024, 1024), 15, np.uint8)
+    cv2.circle(bg, (512, 512), int(3.6 * k), 72, -1)          # the big nozzle's light disc
+    cv2.circle(bg, (512, 512), int(0.6 * k), 18, -1)          # its hole
+    img = bg.copy()
+    w, l = int(2.6 * k), int(5.0 * k)
+    cv2.rectangle(img, (512 - w // 2, 512 - l // 2), (512 + w // 2, 512 + l // 2), 34, -1)      # black body
+    for s in (-1, 1):                                          # the two terminals, narrower than the body
+        y = 512 + s * (l // 2 - 15)
+        cv2.rectangle(img, (512 - 20, y - 15), (512 + 20, y + 15), 160, -1)
+    r = V.analyze_nozzle(img, bg, 170, k)
+    assert r.valid and abs(min(r.w, r.h) - 2.6) < 0.15 and abs(max(r.w, r.h) - 5.0) < 0.15, r
+    assert abs(r.x) < 0.05 and abs(r.y) < 0.05, r
+    empty = V.analyze_nozzle(bg.copy(), bg, 170, k)
+    assert not empty.valid and empty.empty
+
+
+def test_darker_exposure_is_not_a_huge_part():
+    # the same run (11:52): the part shot at another exposure than the background -> 19.5 x 19.6 mm
+    k = 34.0
+    bg = np.full((1024, 1024), 90, np.uint8)                   # a well-lit background all over
+    cv2.circle(bg, (512, 512), int(3.6 * k), 140, -1)
+    img = (bg.astype(np.float32) * 0.6).astype(np.uint8)       # the part's shot 40 % darker
+    cv2.rectangle(img, (512 - 30, 512 - 20), (512 + 30, 512 + 20), 250, -1)    # a bright 1.8 x 1.2 part
+    r = V.analyze_nozzle(img, bg, 300, k)
+    assert r.valid and max(r.w, r.h) < 2.2, r                  # the part, not the whole picture
+
+
+def test_bright_part_darkening_its_rows_is_not_stretched():
+    # 2026-11-19, C43 on nozzle 1: 15.30 x 1.88 mm, the box running from the part to the search's edge
+    k = 34.0
+    bg = np.full((1024, 1024), 15, np.uint8)
+    cv2.circle(bg, (512, 512), int(3.6 * k), 72, -1)
+    img = bg.copy()
+    y0, y1 = 512 - int(0.62 * k), 512 + int(0.62 * k)
+    img[y0:y1, :] = cv2.subtract(img[y0:y1, :], 30)            # the part's rows 30 grey darker, all along
+    cv2.rectangle(img, (512 - int(1.0 * k), y0), (512 + int(1.0 * k), y1), 230, -1)    # a white 0805
+    r = V.analyze_nozzle(img, bg, 500, k)
+    assert r.valid and abs(max(r.w, r.h) - 2.0) < 0.2 and abs(min(r.w, r.h) - 1.25) < 0.2, r
+    assert abs(r.x) < 0.1, r
+
+
+def test_small_part_angle_is_fine():
+    # an 0603 on the up camera (54 x 27 px): the pixel outline read its angle up to 2.9 deg wrong
+    k = 34.0
+    bg = np.full((1024, 1024), 20, np.uint8)
+    worst = 0.0
+    for ang in (-5.0, -2.3, -0.7, 0.4, 1.9, 3.1, 4.6):
+        big = np.zeros((4096, 4096), np.float32)
+        box = cv2.boxPoints((((512 + 3.4) * 4, (512 - 2.4) * 4), (1.6 * k * 4, 0.8 * k * 4), -ang))
+        cv2.fillPoly(big, [np.int32(np.round(box))], 1.0)
+        m = cv2.resize(big, (1024, 1024), interpolation=cv2.INTER_AREA)
+        img = np.clip(20 + 180 * m, 0, 255).astype(np.uint8)
+        r = V.analyze_nozzle(img, bg, 170, k)
+        assert r.valid and abs(r.x - 0.1) < 0.02 and abs(r.y - 2.4 / k) < 0.02, r
+        worst = max(worst, abs(r.angle - ang))
+    assert worst < 0.5, worst

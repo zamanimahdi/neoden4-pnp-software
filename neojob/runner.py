@@ -384,6 +384,7 @@ class Runner:
             look = max(0, int(self.cfg.job("nCycleLookahead") or 0))
             mix = bool(self.cfg.job("bCycleMixSpeeds"))
             tried = set()                                   # taken into a cycle on this panel (placed or not)
+            tall_now = False                                # tall parts (Job/fTallPartMm): after every other part of the panel
             while True:
                 slots, i, first_left = [], c, None
                 while i < len(job.comps) and len(slots) < 4:
@@ -396,6 +397,22 @@ class Runner:
                     if (p, i) in self.done or i in tried or (comp.skip and not test) or st is None or (st.skip and not test) or not 1 <= comp.nozzle <= 4:
                         i += 1
                         continue
+                    if not test and self.is_tall(st, comp):
+                        # a tall part (PC817) is placed after every lower part of the panel (a low part can no
+                        # longer be brought in beside it, and the nozzle with a low part passes over it); it
+                        # travels alone, and the tall ones in an order that never carries one over another
+                        # already on the board (see next_tall)
+                        if not tall_now:
+                            i += 1
+                            continue
+                        j = self.next_tall(p, tf, tried, i)
+                        cj = job.comps[j]
+                        slots.append({"index": j, "comp": cj, "stack": job.stack(cj.stack), "nozzle": cj.nozzle, "ok": False, "held": False, "tall": True})
+                        if j != i:
+                            first_left = i                  # this one stays next in the list
+                        else:
+                            i += 1
+                        break
                     if slots and (comp.nozzle in [s["nozzle"] for s in slots] or (not mix and st.speed != slots[0]["stack"].speed)):
                         # its nozzle is taken: left for the next cycle; a part a little further on may fill this one
                         if first_left is None:
@@ -407,10 +424,15 @@ class Runner:
                     slots.append({"index": i, "comp": comp, "stack": st, "nozzle": comp.nozzle, "ok": False, "held": False})
                     i += 1
                 c = first_left if first_left is not None else i
+                if not slots and not tall_now:
+                    tall_now, c = True, 0                   # the lower parts are done: now the tall ones, from the top of the list
+                    if any(self.is_tall(job.stack(k.stack), k) for k in job.comps if not k.skip):
+                        self.log("tall parts now (after all the others), farthest from the camera first")
+                    continue
                 if not slots:
                     break
                 tried.update(s["index"] for s in slots)
-                self.comp = slots[0]["index"]
+                self.comp = min(c, slots[0]["index"])       # a tall part taken out of turn: resume from the list's place
                 self.cycle(slots, tf, p)
                 self.comp = c
                 if getattr(self, "only", None) is not None:
@@ -583,21 +605,50 @@ class Runner:
             left = [s for s in left if s["held"]]
             if not left:
                 return
-            results = self.vision.parts(left, self) if not self.job.test else {}
+            self.tf_now, self.panel_now = tf, p
             for s in left:
-                self.check_picked(s, results.get(s["nozzle"]))
-                if s.get("ok") and s["stack"].vision > 0:
-                    self.learn_pick(s, results.get(s["nozzle"]))
-            for w in (self.stats.warn(float(self.cfg.job("fStatsWarnPct"))) if getattr(self, "stats", None) else []):
-                self.log(w)
-            for s in left:
-                if s["stack"].vision < 1 or s["ok"] or self.job.test:
-                    s["target"] = self.prepare(s, tf, results.get(s["nozzle"]))
+                if s.get("tall") and not self.job.test:
+                    self.tall_to_camera(s)
             see_turn = bool(self.cfg.job("bSeeTurnSee"))   # single-part vision: always see, turn, see
-            again = [s for s in left if "target" in s and (getattr(s["stack"], "second_look", False) or (see_turn and not s.get("joint")))
-                     and not self.job.test and s["stack"].vision > 0 and s.get("res") is not None and s["res"].valid]
-            if again:
-                self.second_look(again)
+            two = lambda s: (s["comp"].second_look if getattr(s["comp"], "second_look", None) is not None    # the part's own setting,
+                             else getattr(s["stack"], "second_look", False))                                    # else its feeder's
+            looks_again = lambda s: ("target" in s and (two(s) or (see_turn and not s.get("joint")))
+                                     and not self.job.test and s["stack"].vision > 0 and s.get("res") is not None and s["res"].valid)
+            four = getattr(self.vision, "four_up_ok", None)
+            one_shot = [s for s in left if four and four(s, self)]
+            each = (not self.job.test and len(left) > 1 and len(one_shot) < 2
+                    and any(two(s) or see_turn for s in left if s["stack"].vision > 0))
+            if each:
+                # each part done over the camera before the next: seen, turned to its place angle, seen again
+                # (turned again if it reads wrong). Before, all were seen, then all turned, then the head
+                # went from nozzle to nozzle once more for every look: twice the moves and slower
+                results = {}
+                for s in left:
+                    r1 = self.vision.parts([s], self)
+                    results.update(r1)
+                    self.check_picked(s, r1.get(s["nozzle"]))
+                    if s.get("ok") and s["stack"].vision > 0:
+                        self.learn_pick(s, r1.get(s["nozzle"]))
+                    if s["stack"].vision < 1 or s["ok"]:
+                        s["target"] = self.prepare(s, tf, r1.get(s["nozzle"]))
+                        if looks_again(s):
+                            self.second_look([s])
+                for w in (self.stats.warn(float(self.cfg.job("fStatsWarnPct"))) if getattr(self, "stats", None) else []):
+                    self.log(w)
+            else:
+                results = self.vision.parts(left, self) if not self.job.test else {}
+                for s in left:
+                    self.check_picked(s, results.get(s["nozzle"]))
+                    if s.get("ok") and s["stack"].vision > 0:
+                        self.learn_pick(s, results.get(s["nozzle"]))
+                for w in (self.stats.warn(float(self.cfg.job("fStatsWarnPct"))) if getattr(self, "stats", None) else []):
+                    self.log(w)
+                for s in left:
+                    if s["stack"].vision < 1 or s["ok"] or self.job.test:
+                        s["target"] = self.prepare(s, tf, results.get(s["nozzle"]))
+                again = [s for s in left if looks_again(s)]
+                if again:
+                    self.second_look(again)
             first = True
             todo = [s for s in left if "target" in s]
             if route and len(todo) > 1 and getattr(self.mb, "pos", None) and self.same_height(todo):
@@ -950,7 +1001,17 @@ class Runner:
                 o = self.nozzle_offset(n)
                 px, py = s["pre"]
                 X2, Y2 = px - r.x + o[0], py - r.y + o[1]      # the offset at the angle it is at now
+                was = s.get("look_best")                       # (turn left, target) of the look before the last turn
+                if was is not None and abs(e) > was[0] + tol:
+                    # the turn made it worse (a reading that does not follow the nozzle: 2026-11-19, turns of
+                    # 0.9, 1.9, 3.7, 7.4 deg one after the other, parts placed askew): back to the angle before
+                    self.retry("Angle correction failed", lambda: self.turn(n, was[1][2], wait=True))
+                    s["target"] = was[1]
+                    self.log(f"{name}: second look {look}: {e:+.2f} deg left after the turn, {was[0]:.2f} before it: "
+                             f"turned back to {was[1][2]:+.2f}, the look before is used")
+                    continue
                 s["target"] = (X2, Y2, A)
+                s["look_best"] = (abs(e), (X2, Y2, A))
                 if abs(e) <= tol or look == looks:
                     self.log(f"{name}: second look {look}: turn {e:+.2f} deg left{'' if abs(e) <= tol else ' (looks used up)'}, "
                              f"place point moved {X2 - X:+.3f}, {Y2 - Y:+.3f} mm")
@@ -1019,6 +1080,153 @@ class Runner:
         mb.move_xy(max(X - 1.0, 0.0), max(Y - 1.0, 0.0))
         return mb.move_xy(X, Y, wait=False, speed=min(sp, self.speed_cache or sp))
 
+    # ---- tall parts (Job/fTallPartMm): a PC817 on the nozzle cannot pass over a PC817 on the board ----
+    # The nozzle's whole travel is ~8 mm above the board (7 where the board lies high) and two such parts
+    # are 7 - 8 mm: BOARD-A, 2026-11-19, optos knocked off by the next one on its way from the camera.
+    TALL_TOL = 0.15                                        # mm two boxes may overlap (parts side by side)
+
+    def is_tall(self, st, comp):
+        lim = float(self.cfg.job("fTallPartMm") or 0.0)
+        return lim > 0 and st is not None and self.part_height(st, comp) >= lim
+
+    def tall_half(self, comp, st):
+        """half the part's size on the board (mm along X, Y) and its box's centre from the part's own:
+        the box round its pads (pads file) + 0.3 mm, else the feeder's part size (either way round), else 5"""
+        pads = getattr(self, "pads", None) or {}
+        part = pads.get(getattr(comp, "key", None) or comp.name) or pads.get(comp.name)
+        if part and part.get("pads"):
+            x0 = min(q[0] - q[2] / 2 for q in part["pads"])
+            x1 = max(q[0] + q[2] / 2 for q in part["pads"])
+            y0 = min(q[1] - q[3] / 2 for q in part["pads"])
+            y1 = max(q[1] + q[3] / 2 for q in part["pads"])
+            return ((x1 - x0) / 2 + 0.3, (y1 - y0) / 2 + 0.3, (x0 + x1) / 2 - part.get("x", comp.x), (y0 + y1) / 2 - part.get("y", comp.y))
+        m = max(getattr(st, "part_l", 0) or 0, getattr(st, "part_w", 0) or 0) / 2
+        return (m or 5.0, m or 5.0, 0.0, 0.0)
+
+    def tall_boxes(self, p, tf, skip=None):
+        """the tall parts already on panel p: [(x, y, half x, half y)], machine mm in nozzle 1's frame"""
+        out = []
+        for (pp, i) in self.done:
+            if pp != p or i == skip or i >= len(self.job.comps):
+                continue
+            c = self.job.comps[i]
+            st = self.job.stack(c.stack)
+            if not self.is_tall(st, c):
+                continue
+            hx, hy, ox, oy = self.tall_half(c, st)
+            x, y = tf.point(c.x, c.y)[:2]
+            out.append((x + ox, y + oy, hx, hy))
+        return out
+
+    @classmethod
+    def free_seg(cls, A, B, h, boxes):
+        """may a box of half size h go straight from A to B (its centre) without touching the boxes?"""
+        for (cx, cy, bx, by) in boxes:
+            t0, t1, hit = 0.0, 1.0, True
+            for a, b, c, e in ((A[0], B[0], cx, bx + h[0] - cls.TALL_TOL), (A[1], B[1], cy, by + h[1] - cls.TALL_TOL)):
+                d = b - a
+                if abs(d) < 1e-9:
+                    if abs(a - c) >= e:
+                        hit = False
+                        break
+                    continue
+                u0, u1 = (c - e - a) / d, (c + e - a) / d
+                if u0 > u1:
+                    u0, u1 = u1, u0
+                t0, t1 = max(t0, u0), min(t1, u1)
+                if t0 >= t1:
+                    hit = False
+                    break
+            if hit:
+                return False
+        return True
+
+    @classmethod
+    def free_rect(cls, A, B, h, boxes):
+        """may it go from A to B by any way inside the rectangle they span (both axes moving at once)?"""
+        x0, x1, y0, y1 = min(A[0], B[0]), max(A[0], B[0]), min(A[1], B[1]), max(A[1], B[1])
+        for (cx, cy, bx, by) in boxes:
+            if (cx + bx + h[0] - cls.TALL_TOL > x0 and cx - bx - h[0] + cls.TALL_TOL < x1
+                    and cy + by + h[1] - cls.TALL_TOL > y0 and cy - by - h[1] + cls.TALL_TOL < y1):
+                return False
+        return True
+
+    def tall_way(self, A, B, h, boxes):
+        """how to go from A to B: [] = straight, [mid] = one axis after the other, None = no free way"""
+        if self.free_rect(A, B, h, boxes):
+            return []
+        for mid in ((B[0], A[1]), (A[0], B[1])):
+            if self.free_seg(A, mid, h, boxes) and self.free_seg(mid, B, h, boxes):
+                return [mid]
+        return None
+
+    def next_tall(self, p, tf, tried, first):
+        """the tall part to place now: one whose way from the camera is free of the tall parts already
+        placed, the farthest from the camera first (then the later ones never have to pass it); `first`
+        (the next in the job's list) when there is nothing to choose"""
+        job = self.job
+        boxes = self.tall_boxes(p, tf)
+        best = None
+        for i, c in enumerate(job.comps):
+            st = job.stack(c.stack)
+            if (p, i) in self.done or i in tried or c.skip or st is None or st.skip or not 1 <= c.nozzle <= 4 or not self.is_tall(st, c):
+                continue
+            o = self.nozzle_offset(c.nozzle)
+            cam = self.cfg.nozzle_positions[c.nozzle - 1]
+            A = (cam[0] - o[0], cam[1] - o[1])
+            hx, hy, _, _ = self.tall_half(c, st)
+            T = tf.point(c.x, c.y)[:2]
+            key = (self.tall_way(A, T, (hx, hy), boxes) is not None, math.dist(A, T))
+            if best is None or key > best[0]:
+                best = (key, i)
+        return best[1] if best else first
+
+    def tall_to_camera(self, s):
+        """the picked tall part's way to the up camera: one axis after the other when the straight way
+        passes a tall part on the board (the last leg is the vision's own move)"""
+        n = s["nozzle"]
+        boxes = self.tall_boxes(getattr(self, "panel_now", self.panel), self.tf_now)
+        pos = getattr(self.mb, "pos", None)
+        if not boxes or not pos:
+            return
+        o = self.nozzle_offset(n)
+        cam = self.cfg.nozzle_positions[n - 1]
+        m = max(self.tall_half(s["comp"], s["stack"])[:2])        # not turned yet: its longer half both ways
+        way = self.tall_way((pos[0] - o[0], pos[1] - o[1]), (cam[0] - o[0], cam[1] - o[1]), (m, m), boxes)
+        if way:
+            self.log(f"{s['comp'].name}: tall part: to the camera one axis after the other (tall parts on the board in the straight way)")
+            self.retry("Move to the camera failed", lambda: self.mb.move_xy(way[0][0] + o[0], way[0][1] + o[1], timeout=20))
+        elif way is None:
+            self.log(f"{s['comp'].name}: tall part: no free way to the camera past the tall parts on the board")
+
+    def tall_approach(self, X, Y, s):
+        """the place point for a tall part: as every part (from below-left, 1 mm before it) when that way is
+        free of the tall parts on the board; else one axis after the other and straight onto the point
+        (no step beside it: the neighbour stands there); no free way at all: the operator is asked"""
+        n, mb = s["nozzle"], self.mb
+        tf = getattr(self, "tf_now", None)
+        boxes = self.tall_boxes(getattr(self, "panel_now", self.panel), tf, skip=s["index"]) if tf is not None else []
+        pos = getattr(mb, "pos", None)
+        if not boxes or not pos:
+            return self.approach(X, Y)
+        o = self.nozzle_offset(n)
+        hx, hy, _, _ = self.tall_half(s["comp"], s["stack"])
+        h = (hx, hy)
+        A, T = (pos[0] - o[0], pos[1] - o[1]), (X - o[0], Y - o[1])
+        P = (T[0] - 1.0, T[1] - 1.0)
+        if self.free_rect(A, P, h, boxes) and self.free_seg(P, T, h, boxes) and self.free_rect(A, T, h, boxes):
+            return self.approach(X, Y)
+        for mid in ((T[0], A[1]), (A[0], T[1])):
+            if self.free_seg(A, mid, h, boxes) and self.free_seg(mid, T, h, boxes):
+                self.log(f"{s['comp'].name}: tall part: placed one axis after the other, straight onto its point (tall parts beside it)")
+                mb.move_xy(mid[0] + o[0], mid[1] + o[1])
+                return mb.move_xy(X, Y, wait=False)
+        a = self.ask(f"{s['comp'].name}: tall part: no free way to its place past the tall parts on the board. "
+                     "Yes = place it anyway, No = stop the job")
+        if a == NO:
+            raise Abort(f"{s['comp'].name}: no free way for a tall part")
+        return self.approach(X, Y)
+
     @staticmethod
     def nearest_order(items, start, point):
         """items in nearest-neighbour order from `start`: the head's travel through them is shorter
@@ -1082,7 +1290,8 @@ class Runner:
         st, n, mb, zs = s["stack"], s["nozzle"], self.mb, self.zspeed()
         tz = self.ztilt(n, A, max(0.0, 12.0 - st.place_height))      # the tip's shift at the place depth
         X, Y = X - tz[0], Y - tz[1]
-        self.retry(f"Placement position [{X:.2f}, {Y:.2f}] move failed", lambda: self.approach(X, Y))
+        self.retry(f"Placement position [{X:.2f}, {Y:.2f}] move failed",
+                   lambda: self.tall_approach(X, Y, s) if s.get("tall") else self.approach(X, Y))
         self.retry("Failure: angle correction timeout", lambda: mb.wait_idle(n, 2))
         self.retry(f"Placement position [{X:.2f}, {Y:.2f}] move failed", lambda: mb.wait_xy(20))
         self.checkpoint()

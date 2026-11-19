@@ -182,6 +182,104 @@ class SlipVision(FakeVision):
         return out
 
 
+class StuckVision(FakeVision):
+    """a reading that does not follow the nozzle: after the first turn it always reads the same angle"""
+    def __init__(self):
+        super().__init__()
+        self.fixed = None
+
+    def parts(self, slots, runner):
+        self.calls += 1
+        out = {}
+        for s in slots:
+            if "target" not in s:
+                out[s["nozzle"]] = PartResult(True, 0.05, -0.03, 2.0, 1.25, 1.5)
+                continue
+            if self.fixed is None:
+                self.fixed = 1.5 + s["target"][2] + 0.9          # 0.9 deg left, and it stays what is read
+            out[s["nozzle"]] = PartResult(True, 0.05, -0.03, 2.0, 1.25, self.fixed)
+        return out
+
+
+def test_look_after_turn_never_runs_away():
+    """the turn does not make the reading better: turned back, the look before is used (2026-11-19: 0.9,
+    1.9, 3.7, 7.4 deg turned one after the other and the part placed askew)"""
+    d = tempfile.mkdtemp()
+    p = os.path.join(d, "job.csv")
+    open(p, "wb").write(open(JOB, "rb").read())
+    job = load_job(p)
+    i = next(k for k, c in enumerate(job.comps) if not c.skip and job.stack(c.stack) and not job.stack(c.stack).skip and job.stack(c.stack).vision > 0)
+    r, mb, log, _ = make(p)
+    r.cfg.raw["Job/bSeeTurnSee"] = True
+    r.vision = StuckVision()
+    placed = []
+    pl = r.place
+    r.place = lambda s, first: (placed.append((s["target"], mb.angle[s["nozzle"]])), pl(s, first))[1]
+    first = []
+    prep = r.prepare
+    r.prepare = lambda s, tf, res: (lambda t: (first.append(t), t)[1])(prep(s, tf, res))
+    assert r.run(job, only=i), NL.join(log[-20:])
+    looks = [l for l in log if "second look" in l]
+    assert len(looks) == 2 and "turn +0.90" in looks[0] and "turned back" in looks[1], NL.join(looks)
+    (X, Y, A), at = placed[0]
+    assert abs(A - first[0][2]) < 1e-6 and abs(at - A) < 1e-6, (A, first[0][2], at)     # the angle before the bad turn
+    print("look after turn, reading stuck: OK (" + looks[-1] + ")")
+
+
+class OrderVision(FakeVision):
+    """notes which nozzles each call looked at; a turned part reads as turned"""
+    def __init__(self):
+        super().__init__()
+        self.seen = []
+
+    def parts(self, slots, runner):
+        self.calls += 1
+        self.seen.append(tuple(s["nozzle"] for s in slots))
+        return {s["nozzle"]: PartResult(True, 0.05, -0.03, 2.0, 1.25, 1.5 + (s["target"][2] if "target" in s else 0.0)) for s in slots}
+
+
+def test_each_part_finished_over_the_camera():
+    """see, turn, see with several nozzles: each part is seen, turned and seen again before the next one
+    (not all seen, all turned, then the head from nozzle to nozzle again)"""
+    from neojob import assign as A
+    d = tempfile.mkdtemp()
+    p = os.path.join(d, "job.csv")
+    open(p, "wb").write(open(JOB, "rb").read())
+    job = load_job(p)
+    for st in job.stacks.values():
+        st.nozzles = "1234"
+    for c in job.comps:
+        c.nozzle = 1
+    todo = sum(1 for c in job.comps if not c.skip and not job.stack(c.stack).skip)
+    A.plan_nozzles(job)
+    r, mb, log, answers = make(p)
+    r.cfg.raw["Job/bSeeTurnSee"] = True
+    r.vision = OrderVision()
+    marks, cyc = [], r.cycle
+    r.cycle = lambda slots, tf, pn: (marks.append(len(r.vision.seen)), cyc(slots, tf, pn))[1]
+    cam_moves, mv = [], mb.move_xy
+    spots = [tuple(round(v, 3) for v in q) for q in r.cfg.nozzle_positions]
+
+    def move(x, y, *a, **k):
+        if (round(x, 3), round(y, 3)) in spots and (not mb.pos or (round(mb.pos[0], 3), round(mb.pos[1], 3)) != (round(x, 3), round(y, 3))):
+            cam_moves.append((x, y))
+        return mv(x, y, *a, **k)
+    mb.move_xy = move
+    assert r.run(job), NL.join(log[-20:])
+    assert r.placed == todo and not answers, (r.placed, todo, answers)
+    marks.append(len(r.vision.seen))
+    big = 0
+    for a, b in zip(marks, marks[1:]):
+        calls = r.vision.seen[a:b]
+        assert all(len(c) == 1 for c in calls), calls             # one part at a time
+        order = [c[0] for c in calls]
+        once = [n for i, n in enumerate(order) if i == 0 or order[i - 1] != n]
+        assert len(once) == len(set(once)), order                 # no nozzle looked at again after another one
+        big = max(big, len(set(order)))
+    assert big == 4 and sum(len(c) for c in r.vision.seen) >= 2 * todo
+    print(f"each part finished over the camera: OK ({todo} parts, {len(r.vision.seen)} looks)")
+
+
 def test_see_turn_see():
     """single-part vision: looked at, turned, looked at again until the turn reads right; every turn
     ends from the same side; nothing turns after the last look, whose offset is placed"""

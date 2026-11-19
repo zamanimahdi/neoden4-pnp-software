@@ -9,6 +9,7 @@
 One Project per browser session (sid), as neosetup asks; idle projects are dropped after 12 h.
 Tool options are kept in <backup>/neosetup-settings.json, never in the user's own settings.
 """
+import math
 import os
 import threading
 import time
@@ -81,6 +82,74 @@ class Setup:
     def close(self, sid):
         with self.lock:
             self.projects.pop(sid, None)
+            getattr(self, "boards", {}).pop(sid, None)
+
+    # ---- the board as one picture: the Gerber drawn here, not as 18 000 polygons in the browser ----
+    # (BOARD-A: 4.4 MB of shapes for every redraw of the Board step; on the machine's own screen the
+    # picture never came.) The page asks board_info (cheap: has anything changed?) and then the PNG.
+    BOARD_COLORS = {"copper": (64, 96, 212), "silk": (40, 200, 250), "outline": (128, 222, 74)}     # BGR
+    BOARD_BG = (23, 17, 13)
+
+    def _board_rev(self, p):
+        g = p.engine
+        gs = g["gerber_state"]
+        return repr((tuple(round(float(v), 6) for v in g["board_xform"]), tuple(round(float(v), 4) for v in gs["offset"]),
+                     sorted((k, bool(v)) for k, v in gs["visible"].items()), [(L["key"], len(L["shapes"])) for L in gs["layers"]]))
+
+    def board_info(self, sid):
+        """{rev, loaded, extent [x0, y0, x1, y1] mm, k px/mm, w, h}: the picture's place in the P&P frame"""
+        p = self.project(sid)
+        rev = self._board_rev(p)
+        c = self.__dict__.setdefault("boards", {}).get(sid)
+        if c is None or c["key"] != rev:
+            c = self._board_draw(p, rev)
+            c["key"] = rev
+            self.boards[sid] = c
+        return {k: v for k, v in c.items() if k not in ("png", "key")}
+
+    def board_png(self, sid):
+        self.board_info(sid)
+        return self.boards[sid]["png"]
+
+    def _board_draw(self, p, rev, max_px=2800, margin=3.0):
+        import cv2
+        import numpy as np
+        import zlib
+        layers = p.gerber_shapes()["layers"]
+        xs, ys = [], []
+        for L in layers:
+            for s in L["shapes"]:
+                if s[0] == "C":
+                    xs += [s[1] - s[3], s[1] + s[3]]
+                    ys += [s[2] - s[3], s[2] + s[3]]
+                else:
+                    xs += [q[0] for q in s[1]]
+                    ys += [q[1] for q in s[1]]
+        tag = format(zlib.crc32(rev.encode()) & 0xFFFFFFFF, "08x")
+        if not xs:
+            return {"rev": tag, "loaded": False, "png": b""}
+        x0, y0, x1, y1 = min(xs) - margin, min(ys) - margin, max(xs) + margin, max(ys) + margin
+        k = min(16.0, max_px / max(x1 - x0, y1 - y0))
+        W, H = int(math.ceil((x1 - x0) * k)), int(math.ceil((y1 - y0) * k))
+        img = np.empty((H, W, 3), np.uint8)
+        img[:] = self.BOARD_BG
+        SH = 4                                                    # 1/16 px
+        f = k * (1 << SH)
+        for kind in ("copper", "silk", "outline"):
+            col = self.BOARD_COLORS[kind]
+            for L in layers:
+                if L["kind"] != kind:
+                    continue
+                for s in L["shapes"]:
+                    c = col if s[-1] is not False else self.BOARD_BG
+                    if s[0] == "C":
+                        cv2.circle(img, (int(round((s[1] - x0) * f)), int(round((y1 - s[2]) * f))), max(1 << SH, int(round(s[3] * f))), c, -1, cv2.LINE_AA, SH)
+                    elif len(s[1]) >= 3:
+                        pts = np.array([[(q[0] - x0) * f, (y1 - q[1]) * f] for q in s[1]]).round().astype(np.int32)
+                        cv2.fillPoly(img, [pts], c, cv2.LINE_AA, SH)
+        ok, png = cv2.imencode(".png", img, [cv2.IMWRITE_PNG_COMPRESSION, 3])
+        return {"rev": tag, "loaded": True, "extent": [round(x0, 3), round(y0, 3), round(x1, 3), round(y1, 3)], "k": round(k, 4),
+                "w": W, "h": H, "png": png.tobytes()}
 
     def call(self, req):
         """-> (http code, reply dict)"""

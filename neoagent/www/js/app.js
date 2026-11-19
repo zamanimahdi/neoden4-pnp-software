@@ -9,9 +9,9 @@ const App = {
     wizard: (r) => Wizard.render(r), job: (r) => JobRun.render(r), jobfile: (r) => JobFile.render(r), padalign: (r) => PadAlign.render(r), visionlog: (r) => VisionLog.render(r), network: (r) => Network.render(r), bulk: (r) => Bulk.render(r), stats: (r) => Stats.render(r), feedcheck: (r) => Checks.feeders(r), boardcheck: (r) => Checks.board(r), setupview: (r) => SetupView.render(r), feedsetup: (r) => SetupAuto.feeders(r), camoffset: (r) => SetupAuto.camoffset(r), cammap: (r) => SetupAuto.cammap(r),
   },
   sections: [
-    { id: "work", label: "Work", icon: "▶", pages: ["job", "stats"] },
-    { id: "newjob", label: "New job", icon: "✚", pages: ["wizard", "jobfile", "feedsetup", "feedcheck", "boardcheck", "setupview"] },
-    { id: "machine", label: "Machine settings", icon: "⚙", pages: ["manual", "cameras", "setups", "cammap", "camoffset", "bulk", "padalign", "visionlog", "network", "settings"] },
+    { id: "work", label: "Work", icon: "play", pages: ["job", "stats"] },
+    { id: "newjob", label: "New job", icon: "plus", pages: ["wizard", "jobfile", "feedsetup", "feedcheck", "boardcheck", "setupview"] },
+    { id: "machine", label: "Machine settings", icon: "gear", pages: ["manual", "cameras", "setups", "cammap", "camoffset", "bulk", "padalign", "visionlog", "network", "settings"] },
     { id: "system", label: "System", pages: ["dashboard", "files", "updates"], menu: true },
   ],
   meta: {
@@ -39,19 +39,39 @@ const App = {
   },
   sub: { manual: "Manual control", cameras: "Cameras", setups: "Calibration", padalign: "Pad alignment", visionlog: "Vision log", network: "Network", bulk: "Bulk feeders", stats: "Statistics", feedcheck: "Check feeders", boardcheck: "Check board", setupview: "Setup view", feedsetup: "Set up feeders", camoffset: "Camera offset", cammap: "Camera matrix", settings: "Settings (Config.ini)",
     dashboard: "System status", files: "Files", updates: "Updates", job: "Work", wizard: "Setup wizard", jobfile: "Job file settings" },
+  pageIcon: { job: "play", stats: "chart", wizard: "wand", jobfile: "file", feedsetup: "reel", feedcheck: "check", boardcheck: "board", setupview: "eye",
+    manual: "move", cameras: "camera", setups: "ruler", cammap: "grid", camoffset: "target", bulk: "box", padalign: "pads", visionlog: "eye", network: "wifi", settings: "sliders" },
   sectionOf(name) { return this.sections.find((s) => s.pages.includes(name)) || this.sections[0]; },
   nav(name) {
     const sec = this.sectionOf(name);
     const nav = document.getElementById("nav");
     nav.replaceChildren(...this.sections.filter((s) => !s.menu).map((s) => h("a", { href: "#" + (s.last || s.pages[0]), class: s === sec ? "on" : "" },
-      h("span", { class: "ic" }, s.icon), s.label)));
+      icon(s.icon), s.label)));
     const sub = document.getElementById("subnav");
-    sub.replaceChildren(...(sec.pages.length > 1 ? sec.pages.map((p) => h("a", { href: "#" + p, class: p === name ? "on" : "" }, this.sub[p])) : []));
+    sub.replaceChildren(...(sec.pages.length > 1 ? sec.pages.map((p) => h("a", { href: "#" + p, class: p === name ? "on" : "" }, icon(this.pageIcon[p]), this.sub[p])) : []));
     if (JobRun.mounted && name !== "job") sub.append(h("div", { class: "grow" }),
       h("a", { href: "#job", class: "backmount" }, `◀ Back to mount: ${JobRun.path.split(/[\\/]/).pop().replace(/\.csv$/i, "")}`));
     const menu = document.getElementById("sysmenu"), sys = this.sections.find((s) => s.menu);
     menu.replaceChildren(...sys.pages.map((p) => h("a", { href: "#" + p, class: p === name ? "on" : "" }, this.sub[p])));
+    menu.append(h("div", { class: "menu-sep" }),
+      h("a", { href: "#", onclick: (e) => { e.preventDefault(); this.power("reboot"); } }, icon("restart"), "Restart the machine PC"),
+      h("a", { href: "#", onclick: (e) => { e.preventDefault(); this.power("poweroff"); } }, icon("power"), "Shut down the machine PC"));
     document.getElementById("sysbtn").classList.toggle("on", sec === sys);
+  },
+  // the machine PC restarted / shut down properly (not by its power switch: the disk is then repaired at
+  // the next start). Refused while a job runs. After a restart this page comes back by itself.
+  async power(act) {
+    const re = act === "reboot";
+    if (!confirm(re ? "Restart the machine PC? The machine homes again when it is back (about a minute)."
+      : "Shut down the machine PC? Switch its power off only after the screen has gone dark.")) return;
+    try { await API.req("POST", `/api/power?action=${act}`); } catch (e) { return toast(e.message, "bad"); }
+    toast(re ? "restarting: this page comes back in about a minute" : "shutting down: wait for the screen to go dark, then switch the power off", "warn");
+    if (!re) return;
+    await new Promise((r) => setTimeout(r, 15000));
+    for (let i = 0; i < 90; i++) {
+      try { const r = await fetch("/api/ping", { cache: "no-store" }); if (r.ok) { location.reload(); return; } } catch (e) { /* not back yet */ }
+      await new Promise((r) => setTimeout(r, 2000));
+    }
   },
   // every page can rely on Config.ini (camera offset, px/mm, ...): the Config path comes from the server
   // first, then the file is loaded once, before the first page is drawn (also on a reload or a bookmark)
@@ -67,13 +87,30 @@ const App = {
     const root = h("div", { class: "pagebox" });
     document.getElementById("page").replaceChildren(root);
     const [title, desc] = this.meta[name];
-    if (!(name === "setups" && Setups.current)) root.append(h("div", { class: "pagehead" }, h("h2", {}, title), h("span", { class: "muted" }, desc)));
+    if (!(name === "setups" && Setups.current)) root.append(h("div", { class: "pagehead" }, h("h2", {}, icon(this.pageIcon[name]), title), h("span", { class: "muted" }, desc)));
     // while the page waits for the server it says so; a page that fails shows why (not a blank screen)
     const wait = h("div", { class: "pageload", "aria-busy": "true" }, "Loading …");
     root.append(wait);
     Promise.resolve().then(() => this.pages[name](root))
       .catch((e) => { console.error(e); root.append(h("div", { class: "card bad", role: "alert" }, `This page could not be drawn: ${e && e.message || e}. Reload the page; if it stays, tell the service.`)); })
-      .finally(() => wait.remove());
+      .finally(() => { wait.remove(); this.helpMarks(root); });
+  },
+  // a "?" beside every field whose tooltip says what it is (inputs and selects with a title, outside the
+  // tables): the explanation is then there on a touch screen too, not only on hover. Pages that draw later
+  // (after a server call) are marked when they change.
+  helpMarks(root) {
+    const mark = () => {
+      for (const el of root.querySelectorAll("input[title], select[title], textarea[title]")) {
+        if (el.dataset.hm || el.closest("table, .setrow, .maptools, .cam, .camhead") || el.type === "hidden") continue;
+        el.dataset.hm = "1";
+        const lab = el.closest("label");
+        (lab || el).after(help(el.getAttribute("title")));
+      }
+    };
+    mark();
+    let t = null;
+    const mo = new MutationObserver(() => { if (!root.isConnected) return mo.disconnect(); clearTimeout(t); t = setTimeout(mark, 150); });
+    mo.observe(root, { childList: true, subtree: true });
   },
   // the last errors, in the top bar (the ⚠ button): this screen's and everyone else's
   events: [],
@@ -326,6 +363,8 @@ document.getElementById("homebtn").onclick = async () => {
   document.addEventListener("click", () => set(false));
   document.addEventListener("keydown", (e) => { if (e.key === "Escape") set(false); });
 })();
+// the power button in the top bar: the machine PC shut down properly (asks first; refused while a job runs)
+(() => { const b = document.getElementById("pwrbtn"); if (!b) return; b.append(icon("power")); b.onclick = () => App.power("poweroff"); })();
 // the red STOP: whatever runs (job, auto calibration, a move) stops; valves off, nozzles up, head home
 document.getElementById("stop").onclick = async () => {
   await API.req("POST", "/api/mc/stop").catch(() => API.req("POST", "/api/mc/cancel").catch(() => {}));
