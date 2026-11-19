@@ -22,6 +22,44 @@ with NeoDen4.exe. Not affiliated with or endorsed by NeoDen; NeoDen is the maker
 
 ---
 
+## Screenshots
+
+The web UI, here in Persian with the dark theme (English is one click away), on the simulator with a demo job.
+
+| | |
+|---|---|
+| ![Mount screen](docs/images/ui_mount.png) | ![Job file: feeder settings](docs/images/ui_feeder.png) |
+| **Mount screen**: the run, both cameras, vacuum per nozzle, the part list | **Job file → Feeder settings**: pick point set on the head camera's picture |
+| ![Job file: board](docs/images/ui_board.png) | ![Bulk feeders](docs/images/ui_bulk.png) |
+| **Job file → Board**: re-teach the board from parts or marks | **Bulk feeders**: a holder plate of 20 pockets, placed from two marks |
+| ![Manual control](docs/images/ui_manual.png) | ![Job list](docs/images/ui_jobs.png) |
+| **Manual control**: jog, cameras, lamps, the table map | **Work**: the jobs in `Proc` |
+
+## فارسی
+
+<div dir="rtl">
+
+**نرم‌افزار جایگزین NeoDen4** برای دستگاه پیک‌اند‌پلیس NeoDen4 (میز ثابت، بدون ریل). به‌جای NeoDen4.exe روی خود
+PC دستگاه با Ubuntu 24.04 اجرا می‌شود و از هر مرورگری در شبکه (کامپیوتر یا گوشی) و از مانیتور خود دستگاه (کیوسک)
+کار می‌کند. فایل‌های جاب (`Proc/*.csv`) و `Config.ini` همان فرمت نرم‌افزار اصلی را دارند، پس جاب‌های قبلی بدون تغییر
+کار می‌کنند. رابط کاربری فارسی و انگلیسی است و راهنمای کامل فارسی در `docs/USER_MANUAL_FA.html` هست.
+
+**چه می‌کند**
+- **مونت**: اجرای جاب با شروع، مکث، گام‌به‌گام، توقف و ادامه از همان‌جا؛ پنل‌ها، پرش قطعه و فیدر، سرعت.
+- **راهنمای ساخت جاب**: از فایل پیک‌اند‌پلیس Altium و گربر، جاب کامل می‌سازد: قطعه‌ها، تصویر برد، فیدوشال‌ها، فیدرها و ترتیب.
+- **بینایی**: دوربین پایین (یک نازل یا هر ۴ نازل در یک عکس)، دوربین هد (مارک‌ها، جیب نوار، قطعه‌ی فله)، تراز پد با پدهای گربر، بررسی بعد از گذاشتن.
+- **فیدر فله**: قطعه‌های ریخته در جعبه یا هولدر چندخانه؛ اسکن با کمترین عکس، پیدا کردن هر قطعه حتی وقتی به هم چسبیده‌اند، تشخیص پکیج و جهت.
+- **کالیبراسیون با دوربین**: مقیاس و زاویه‌ی دوربین‌ها، محور نازل‌ها، آفست دوربین هد، ماتریس دوربین، کج بودن Z نازل.
+- **ایمنی**: هوم شدن در هر روشن شدن، دکمه‌ی توقف قرمز در همه‌ی صفحه‌ها، قفل کنترل بین چند صفحه، بررسی وکیوم.
+- **سیستم**: فایل‌ها، پشتیبان، به‌روزرسانی امضاشده، Wi-Fi، آمار نازل و فیدر، لاگ.
+
+**نصب روی NeoDen4 خودتان**: SSD اصلی دستگاه را نگه دارید، ایمیج Ubuntu را بسازید و روی یک SSD دیگر بنویسید، با آن
+بوت کنید و `Config.ini` و جاب‌هایتان را به `/opt/neoden/data` کپی کنید؛ بعد `http://neoden.local/` را باز کنید.
+جزئیات در بخش [Use it on your NeoDen4](#use-it-on-your-neoden4). هر برد جدید را اول با **Test run** امتحان کنید؛
+مسئولیت استفاده با خودتان است.
+
+</div>
+
 ## Use it on your NeoDen4
 
 You can run this software on your own NeoDen4. It replaces only the software on the machine's PC; the
@@ -44,6 +82,8 @@ risk: check every new board with a test run first.
 
 ## Contents
 
+1. [Screenshots](#screenshots)
+1. [فارسی](#فارسی)
 1. [Use it on your NeoDen4](#use-it-on-your-neoden4)
 1. [The machine PC](#the-machine-pc)
 2. [Using it](#using-it)
@@ -635,6 +675,17 @@ task), unless the operator switched it off with Head lamp.
 
 ## Vision
 
+Real pictures from the machine (`tests/data/bulk`, drawn by `tools/vision_gallery.py`):
+
+![Head camera: one part centred](docs/images/vision_head.png)
+*Head camera, one loose part centred: body, angle, leads per side and pitch.*
+
+![Up camera: the part's underside](docs/images/vision_up.png)
+*Up camera, the part held on the nozzle: every piece of metal on its underside, matched against a taught part.*
+
+![Bulk pocket packed full](docs/images/vision_pocket.png)
+*A bulk pocket packed full (the stitched scan): green = a whole body to pick, orange = cut by the pocket's edge.*
+
 `neocam.vision` is NeoDen4's vision ported to OpenCV 4, with fixes.
 
 **Up camera**
@@ -973,7 +1024,7 @@ Next to a job:
 | `boot.d/` | boot scripts (mainboard port, Wi-Fi, password) |
 | `build/image/` | the Ubuntu disk image builder (QEMU, on Windows) |
 | `camserver/`, `serbridge/`, `neoagent/*.c` | the earlier Windows XP versions (camera server, COM bridge, agent), kept for reference |
-| `tools/` | update packages (`mkpkg.py`) and helpers: `board_scan.py` (pad alignment of every part, map + CSV), `upcam_cal.py` (up camera scale / angle, nozzle axes and runout), `fourup_test.py` (4-up vs single shots), `live_vision.py`, `export_public.py` (the public copy: HEAD without the boards, BOMs, machine data, local paths and reverse-engineering notes, into a separate repository; stops if a forbidden word is left) |
+| `tools/` | update packages (`mkpkg.py`) and helpers: `board_scan.py` (pad alignment of every part, map + CSV), `upcam_cal.py` (up camera scale / angle, nozzle axes and runout), `fourup_test.py` (4-up vs single shots), `live_vision.py`, `vision_gallery.py` (the README's vision pictures from `tests/data/bulk`, PNGs without metadata), `export_public.py` (the public copy: HEAD without the boards, BOMs, machine data, local paths and reverse-engineering notes, into a separate repository; stops if a forbidden word is left) |
 | `docs/` | `USER_MANUAL_FA.html` (the user manual in Persian), `MACHINE_PC.md`, `SETUP_WIZARD.md`, `CALIBRATION.md`, `PADALIGN.md`, `KIOSK.md`, `NEOAGENT.md` (API), `SERBRIDGE.md` (protocol), `CAMSERVER.md` |
 
 ## HTTP API
